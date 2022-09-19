@@ -1,0 +1,2232 @@
+---
+title: "Online Supplementary Material"
+author: "Didier Brassard, Hasanga D. Manikpurage, Sébastien Thériault, Benoît J. Arsenault, Benoît Lamarche"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+bibliography: references_OSM.bib
+csl: references_style.csl
+output:
+  bookdown::html_document2:
+     number_sections: FALSE
+     toc: true
+     toc_float: true
+---
+
+```{r setup}
+
+# ********************************************** #
+#                Markdown output                 #
+# ********************************************** #
+
+## Is the output for MS word?
+OUTPUT_WORD <- "N"
+  # if "Y", gt objects are saved as .docx file
+
+# ********************************************** #
+#              Relative file paths               #
+# ********************************************** #
+
+## file path 
+path <- "."
+  # note: files were initially stored on external drive, hence use of <path>
+
+results_dir <- file.path(path,"Results")
+food_dir <- file.path(path,"Results","Foodlist")
+nci_mcmc_model_dir <- file.path(path,"NCI","MCMC_f","Results")
+nci_mcmc_corr_dir <- file.path(path,"NCI","MCMC_distrib","Corr")
+nci_mcmc_distrib_dir <- file.path(path,"NCI","MCMC_distrib","Results")
+suppl_dir <- file.path(path,"Manuscript","OSM")
+
+# ********************************************** #
+#                Markdown set-up                 #
+# ********************************************** #
+
+knitr::opts_chunk$set(
+    echo = FALSE,
+    fig.env = "figure",
+    fig.pos = "p",
+    message = FALSE,
+    warning = FALSE,
+    dpi = 300,
+    out.width = "80%",
+    fig.env="figure"
+    )
+
+## suppress scientific notation
+options(scipen = 9999)
+
+set.seed(12345)
+
+# ********************************************** #
+#             Load required packages             #
+# ********************************************** #
+
+## data management
+library(haven)
+library(tidyverse)
+library(scales)
+library(readxl)
+
+## results presentation
+library(ggplot2)
+library(patchwork)
+library(gt)
+library(MetBrewer)
+
+## Analysis
+library(EValue)
+
+# ********************************************** #
+#      In-house functions for present work       #
+# ********************************************** #
+
+## saving gt object vs. printing directly
+  gtsave_select <- function(object,label,picture){
+if(picture == "Y"){
+  # save as picture
+ object %>%
+    gt::gtsave(file.path(suppl_dir,paste0(label,".docx")))
+} else {
+  # print gt object directly
+  object
+}
+  
+}
+
+## GT Table style
+  gtstyle <- function(gtobject,footnote_marker="numbers"){
+    gtobject %>%
+      gt::tab_style(
+        style = list(
+          cell_text(weight = "bold")  ),
+        locations = cells_row_groups(groups = everything())
+      ) %>%
+      gt::opt_align_table_header("left") %>%
+      gt::opt_footnote_marks(marks=footnote_marker)
+  }
+  
+# makeEstimate macro (to format mean(SD) within mutate step for example)
+
+makeEstimate <- function(est,var,rounding=0.1){
+  paste0( scales::number(est,accuracy = rounding,big.mark=",")," (",scales::number(var,accuracy = rounding,big.mark=",",),")")
+}
+  
+## make95ci macro (to auto format 95%CI based on input data)
+
+make95ci <- function(x,sep=", ",rounding=0.01,reverse=0,add_suffix=""){
+  lcl <- paste0(scales::number(x$lcl95,accuracy=rounding),add_suffix)
+  ucl <- paste0(scales::number(x$ucl95,accuracy=rounding),add_suffix)
+  if(reverse==0){
+  # Regular ordering, estimate (LCL to UCL)
+    return(
+      noquote( paste0(lcl,sep,ucl) )
+    )
+  } else {
+    # Reversed ordering, estimate (UCL to LCL)
+    return(
+      noquote( paste0(ucl,sep,lcl) )
+    )
+  }
+  
+}
+
+## survival curve plot
+  survivalcurveplot <- function(indata,maxtime_manual=0,min_y=0.95,max_y=1){
+    
+    # note: assuming time is coded as `time_to_primary` (months), that HEFI2019_exposure* is defined
+  
+    # ********************************************** #
+    #             Auto-select color hue              #
+    # ********************************************** #
+    
+    # 1) count number of categories (based on <HEFI2019_exposure> variable)
+    n_exposure <- 
+      indata %>%
+      dplyr::distinct(HEFI2019_exposure) %>%
+      dplyr::count(name="n") %>% 
+      dplyr::mutate(n=n-1)  #note: assuming that we always have as many level above and below
+    
+    # 2) Check compatibility: assuming that we may have 2 or 3 levels, but not more or less
+    if((n_exposure/2) > 3 | (n_exposure/2) < 2) {
+      message("Function not made for such exposure input!")
+      stop()
+      }
+    
+    # 3) Assign
+    if((n_exposure/2)==2) { 
+      color_exposure <- c('#424242', # Median
+                          '#e31a1c', # p10
+                          '#fd8d3c', # p25
+                          '#78c679', # p75
+                          '#238443') # p90
+    } else { 
+      color_exposure <- c('#424242', # Median
+                          '#fd8d3c', # p10
+                          '#fecc5c', # p25
+                          '#e31a1c', # p5
+                          '#c2e699', # p75
+                          '#78c679', # p90
+                          '#238443') # p95
+    }    
+    
+    # ********************************************** #
+    #              Set proper time zero              #
+    # ********************************************** #    
+    
+    # 1) Edit data frame to reflect that risks are estimated at the END of each interval
+    ## Create initial value
+    zero <- indata[indata$time_to_primary==0,]
+    zero$estimate <- 1
+    ## Add 1 to time unit (i.e., end of each interval)
+    indata$time_to_primary <- indata$time_to_primary+1
+    ## Append zero with other time point
+    indata <- rbind(zero,indata)
+    
+    # 2) Output max. time of follow-up
+    if(maxtime_manual>0){
+      # user-defined maximum time
+      maxtime <- maxtime_manual
+    }else {
+      # no time, get max. from data
+      maxtime <- max(indata$time_to_primary)
+    }
+    
+    # ********************************************** #
+    #              Plot survival curve               #
+    # ********************************************** #
+    
+    return(
+      indata %>% 
+        ggplot2::ggplot(.,aes(x=(time_to_primary/12),y=estimate,group=HEFI2019_exposure)) +
+        ggplot2::geom_line(aes(colour=HEFI2019_exposure),size=1,show.legend = FALSE) + 
+        ggplot2::coord_cartesian(ylim=c(min_y, max_y)) + 
+        ggplot2::scale_x_continuous(breaks = seq(0, (maxtime/12), by = 2)) +
+        ggplot2::scale_y_continuous(sec.axis = dup_axis(
+          breaks = indata[indata$time_to_primary==maxtime,]$estimate,
+          labels = indata[indata$time_to_primary==maxtime,]$HEFI2019_exposure_full2,
+          name=NULL
+        )) +
+        scale_color_manual(values=color_exposure)+
+        ggplot2::theme_bw() + 
+        ggplot2::theme(
+          panel.grid.minor.x = element_blank()
+        ) +
+        ggplot2::labs(x="Time since baseline, y",
+                      y="Probability of remaining CVD-free"
+        )
+    ) # end of return
+  }
+
+  
+# ********************************************** #
+#                Labels and names                #
+# ********************************************** #
+
+  ### HEFI-2019 component labels
+  complabelstidy <- 
+      c(HEFI2019C1_VF = 'Vegetables and fruits',
+        HEFI2019C2_WHOLEGR = 'Whole-grain foods',
+        HEFI2019C3_GRRATIO = 'Grain foods ratio',
+        HEFI2019C4_PROFOODS = 'Protein foods',
+        HEFI2019C5_PLANTPRO = 'Plant-based protein foods',
+        HEFI2019C6_BEVERAGES = 'Beverages',
+        HEFI2019C7_FATTYACID = 'Fatty acids ratio',
+        HEFI2019C8_SFAT = 'Saturated fats',
+        HEFI2019C9_SUGARS = 'Free sugars',
+        HEFI2019C10_SODIUM = 'Sodium')
+
+  ### HEFI-2019 dietary constituents and components
+  comp <-
+      c('HEFI2019C1_VF', 'HEFI2019C2_WHOLEGR', 'HEFI2019C3_GRRATIO', 'HEFI2019C4_PROFOODS', 'HEFI2019C5_PLANTPRO', 'HEFI2019C6_BEVERAGES', 'HEFI2019C7_FATTYACID', 'HEFI2019C8_SFAT', 'HEFI2019C9_SUGARS', 'HEFI2019C10_SODIUM')
+  
+  food <- 
+    c('vf', 'pfab', 'other', 'pfpb', 'rg', 'wg','plantbev') 
+    
+  beverage <- 
+    c('milk', 'water','ssbs')
+  
+  nutrient <- 
+    c('mufa', 'pufa', 'sfa', 'sugars_free', 'energy', 'urine_na_24h')
+  
+  density <- 
+    c('RATIO_VF', 'RATIO_WGTOT', 'RATIO_WGGR', 'RATIO_PRO', 'RATIO_PLANT', 'RATIO_FA', 'RATIO_BEV', 'SFA_PERC', 'SUG_PERC', 'SODDEN')
+  
+  covar_list <- c('Sex',
+                  'Age',
+                  'Region',
+                  'Townsend deprivation index',
+                  'University degree',
+                  'Employment',
+                  'Familial history of cardiovascular disease',
+                  'Menopausal status (female only)',
+                  'Hormone replacement use (female only)',
+                  'Smoking habits',
+                  'Physical activity level',
+                  'Alcohol consumption habits',
+                  'Sedentary time',
+                  'Body mass index',
+                  'Dietary supplement use',
+                  'Medication use',
+                  'Self-reported risk factor (high cholesterol and/or high blood pressure)',
+                  'Energy intake')
+
+# ********************************************** #
+#             Data with repeated use             #
+# ********************************************** #
+
+## Flow chart data
+  flowchart_data <-
+  haven::read_sas(file.path(results_dir,"flowchart.sas7bdat")) %>% 
+  dplyr::mutate(
+    included=scales::comma(included))
+
+  ### Output final eligible sample
+  eligible_n <- flowchart_data[nrow(flowchart_data),]$included
+  
+  ### Output final eligible sample uncensored
+  eligible_uncensored_n <- 
+  haven::read_sas(file.path(results_dir,"table1_censoring.sas7bdat")) %>% 
+  dplyr::mutate(Category =stringr::str_trim(Category, side = "left"),
+                Frequency_fmt = scales::comma(Frequency)) %>% 
+  dplyr::filter(Category=="cens_primary",Level=="0") %>% 
+  pull(Frequency_fmt)
+
+## import exposure data
+exposure <- 
+  haven::read_sas(file.path(nci_mcmc_model_dir,"inexposure.sas7bdat")) %>% 
+  dplyr::select(p,energy,hefi) %>% 
+  dplyr::rename(HEFI2019_TOTAL_SCORE=hefi) %>% 
+  dplyr::filter(p>=5,p<=95) # force 5-95th percentile  
+
+
+# ********************************************** #
+#   Initialize index for Supplementary Tables    #
+# ********************************************** #
+
+  stable_index <- 1
+  
+```
+
+# Supplementary methods
+
+## Estimand and hypothetical changes
+
+```{r censoring-data}
+
+# *********************************************************************** #
+#               Censoring data: Death or loss to follow-up                #
+# *********************************************************************** #
+
+event_misc <- 
+  haven::read_sas(file.path(results_dir,"event_misc.sas7bdat")) %>%
+  # remove lead and trail blanks
+  dplyr::mutate(
+    Category = stringr::str_trim(Category, side = "both"),
+    Stat = stringr::str_trim(Stat, side = "both"),
+    Stat =gsub(')','%)',Stat)) %>% 
+  # split the formatted field
+  tidyr::separate(.,Stat,into = c("n_fmt","percent_fmt"),sep=' ', remove=FALSE) 
+
+  ## output fatal cens. only
+  fatal_cens <-
+    event_misc %>% 
+    dplyr::filter(Category=="cens_death",Level==1)
+
+# detailed data on censoring
+censoring_misc <- 
+  haven::read_sas(file.path(results_dir,"table1_censoring.sas7bdat")) %>% 
+  dplyr::mutate(
+    Category = stringr::str_trim(Category, side = "both"),
+    Stat = stringr::str_trim(Stat, side = "both"),
+    Stat =gsub(')','%)',Stat),
+    Frequency_fmt = scales::comma(Frequency)) 
+
+  ## output loss to follow-up cens. only
+  lost_cens <- 
+    censoring_misc %>% 
+    dplyr::filter(Category=="lost_flag",Level==1)
+
+
+```
+
+
+The *estimand* of interest, i.e., the target causal effect of an hypothetical intervention, was $Pr(T_{A=1,C=0}>t)-Pr(T_{A=0,C=0}>t), [0,t]$. That is, the difference in probability of being CVD free during follow-up, if all participants had hypothetically "changed" their HEFI-2019 score ($A=1$) vs. if all participants had not "changed" their HEFI-2019 score ($A=0$). Both of which are estimated in a pseudo-population where lost to follow-up (i.e., `r round(lost_cens$Percent,1)`% in the present study) and deaths from non-outcome causes (i.e., censoring due to competing events, `r round(fatal_cens$Percent,1)`%) are absent ($C=0$). Of note, the latter is a working framework to estimate the (direct) effect of an hypothetical change in the presence of competing events [@RN1384].
+
+In the present study, the exposure of interest is adherence to the 2019 CFG recommendations on healthy food choices, which is measured on a continuous scale through the HEFI-2019. While multiple hypothetical "changes" in the HEFI-2019 scores are possible, specific scores at which there are clinically meaningful benefits in terms of CVD prevention are unknown. Thus, we have considered scenarios using plausible values based on the distribution of the HEFI-2019 score in this sample, based on usual intakes (i.e., the 5^th^, 10^th^, 25^th^, 75^th^, 90^th^ and 95^th^ percentiles). Additionally, the "no hypothetical change" condition reflects the HEFI-2019 score participants had on average in the absence of any hypothetical change, i.e., the median HEFI-2019 score (50^th^ percentile).\
+When $A=1$ has a percentile score *higher* than the median score (i.e., 75^th^, 90^th^ and 95^th^), the estimand corresponds to the true effect of an hypothetical intervention where all participants are successful in increasing their HEFI-2019 score up to that percentile's score. When $A=1$ has a percentile score *lower* than the median score (i.e., 5^th^, 10^th^ and 25^th^), the corresponding interpretation of the hypothetical intervention is not as clear because it would be unethical to intervene to reduce the HEFI-2019 and hence diet quality. However, a scenario where the HEFI-2019 is reduced has plausibility, for example, when environmental factors affect affordability or accessibility to healthy foods which, in turn, decreases the HEFI-2019 score.\
+
+\newpage
+
+## Detailed description of exclusion criteria
+
+```{r tabexclusion}
+
+# *********************************************************************** #
+#                      Prepare Supplementary Table                        #
+# *********************************************************************** #
+
+ stable_exclusion <-
+   readxl::read_xlsx(file.path(results_dir,"SupplTable_manual.xlsx"),sheet="exclusion") %>% 
+   dplyr::group_by(type) %>% 
+   gt::gt(.) %>% 
+   gt::cols_move_to_end(ukb_variable) %>% 
+   gt::cols_label(
+     source = md("**Exclusion criteria**"),
+     ukb_variable = md("**UK Biobank variables**"),
+     criteria = md("**Description**"),
+   ) %>% 
+   gt::tab_header(
+     title = md(paste0("**Supplementary Table ",stable_index,".** Detailed description of exclusion criteria")))  %>% 
+   gt::tab_footnote(
+     footnote = md("ICD-10, International Classification of Diseases 10th revision"),
+     location = cells_title("title")) %>% 
+     gt::tab_footnote(
+       footnote = "Missing data for these variables was selected as an eligibility criterion, because they were the most commonly missing in the otherwise eligible sample.",
+       locations = cells_body(columns=criteria,rows= type=="Missing data")
+     ) %>% 
+     gt::tab_footnote(
+       footnote = "Values for creatinine and potassium are required to estimate 24-h sodium intake",
+       locations = cells_body(columns=source,rows= source =="Urine assay")
+     ) %>% 
+   gtstyle(.)
+
+
+# *********************************************************************** #
+#  Use <gtsave_select> function to print table directly or save as png    #
+# *********************************************************************** #
+  
+gtsave_select(stable_exclusion,paste0("SupplTable ",stable_index,". exclusion"),OUTPUT_WORD)
+
+stable_index <- stable_index+1
+
+```
+
+### Removal of 24-h dietary recalls completed after incident CVD-related events
+
+```{r removed24hr}
+
+# *********************************************************************** #
+#           Import data on nb of 24-h dietary recalls removed             #
+# *********************************************************************** #
+
+rm24h <- 
+    haven::read_sas(file.path(results_dir,"event_24hr.sas7bdat"))
+
+n24hr_removed <- 
+  rm24h %>% 
+  dplyr::filter(post_event==1,type=="total_removed")
+
+```
+
+Data from `r sum(n24hr_removed$COUNT)` 24-h dietary recalls (`r noquote(scales::percent(sum(n24hr_removed$PERCENT)/100,accuracy=0.1))`; covering `r rm24h[rm24h$type=="unique_subject",]$COUNT` participants) were excluded from analyses because they were completed after the occurrence of a CVD event, defined using ICD-10 codes described above (**Supplementary Table `r stable_index-1`**). This was done to avoid bias due to probable change in dietary intakes after the incident CVD.
+
+\newpage
+
+## Source of CVD outcome data
+
+```{r tab-outcomesrc}
+
+# *********************************************************************** #
+#                      Prepare Supplementary Table                        #
+# *********************************************************************** #
+
+# import data with source of outcome
+outcomesrc_data <-
+  haven::read_sas(file.path(results_dir,"event_misc.sas7bdat")) %>% 
+  dplyr::slice(grep("event_source",Category)) %>% 
+  dplyr::mutate(
+    Category =stringr::str_trim(Category, side = "left"),
+    event = case_when(Category == "event_source_i21" ~ "i21",
+                      Category == "event_source_i63" ~ "i63" )
+    ) %>% 
+  dplyr::select(event,Level,Stat,Frequency) %>% 
+  dplyr::group_by(event) %>% 
+  pivot_wider(values_from = c(Stat,Frequency),names_from = event)
+
+stable_outcomesrc <-
+  outcomesrc_data %>% 
+   gt::gt(.) %>% 
+    gt::cols_hide(c(Frequency_i21,Frequency_i63)) %>% 
+    gt::cols_label(
+       Level = "Source",
+       Stat_i21 = paste0("Acute myocardial infarction (I21.*),\n n=", sum(outcomesrc_data$Frequency_i21)),
+       Stat_i63 = paste0("Cerebral infarction (I63.*),\n n=", sum(outcomesrc_data$Frequency_i63))
+     )  %>% 
+   gt::tab_style(
+     style = list(
+       cell_text(weight = "bold")  ),
+        locations =  cells_column_labels(columns=everything())
+   ) %>% 
+     gt::tab_header(
+       title = md(paste0("**Supplementary Table  ",stable_index,".** Source of CVD outcome data"))) %>%
+     gt::tab_footnote(
+       footnote = "Values are n (%). CVD cases (I21.* and I63.*) were identified based on the  International Classification of Diseases 10th revision. CVD, cardiovascular disease. ",
+       location = cells_title("title"))  %>% 
+   gtstyle(.)
+
+# *********************************************************************** #
+#  Use <gtsave_select> function to print table directly or save as png    #
+# *********************************************************************** #
+  
+gtsave_select(stable_outcomesrc,paste0("SupplTable ",stable_index,". outcomesrc"),OUTPUT_WORD)
+
+stable_index <- stable_index+1
+
+```
+
+\newpage
+
+## The Healthy Eating Food Index (HEFI)-2019
+
+```{r hefisugars}
+
+# *********************************************************************** #
+#   Output information on assessment of free, natural and total sugars    #
+# *********************************************************************** #
+
+# 1) Mean intakes on a given day
+sugars <-
+  haven::read_sas(file.path(food_dir,"sugars_contribution.sas7bdat")) %>% 
+  # keep only first 24hr (on a given day) - does not matter anyway
+  dplyr::filter(r24_no==1) 
+
+  ## Make <mean (SD)> based on data from the first 24-h
+  mean_sugtot <-
+    makeEstimate(sugars[sugars$Variable=="sugars_total",]$Mean,sugars[sugars$Variable=="sugars_total",]$StdDev,rounding=1)
+  
+  mean_sugnat <-
+    makeEstimate(sugars[sugars$Variable=="sugars_natural",]$Mean,sugars[sugars$Variable=="sugars_natural",]$StdDev,rounding=1)
+  
+  mean_sugfree <-
+    makeEstimate(sugars[sugars$Variable=="sugars_free",]$Mean,sugars[sugars$Variable=="sugars_free",]$StdDev,rounding=1)
+  
+# 2) Ratio of mean
+sugars_ratio <-
+  haven::read_sas(file.path(food_dir,"sugars_ratio.sas7bdat")) 
+
+# 3) Import contribution
+ sugars_top <-
+   readxl::read_xlsx(path=file.path(food_dir,"Naturalsugars_R1_12NOV2021.xlsx")) %>% 
+   # manually add names
+   dplyr::mutate(
+     label = case_when(
+       name == "fruit_dried" ~ "Dried fruits",
+       name == "fruit_prune" ~ "Prunes",
+       name == "fruit_banana" ~ "Banana",
+       name == "fruit_grape" ~ "Grapes",
+       name == "fruit_peach" ~ "Peach/nectarine"
+       )
+   )
+
+```
+
+The HEFI-2019 components, points and standards for scoring are described in Supplementary Table `r stable_index`, adapted from @Brassard2022. The food composition database of the Oxford WebQ does not provide data on sodium and free sugar intakes, which contribute to two key components of the HEFI-2019. The intake of sodium and free sugars was estimated based on data available before applying the HEFI-2019 scoring algorithm.
+
+**Estimation of 24-h sodium intake**\
+The 24-h sodium intake was estimated using the predictive equation of the INTERSALT study [@RN1364] based on casual urinary sodium, potassium and creatinine concentrations. The sex-specific equations were:\
+Males: $Na_{24h}=25.46 + 0.46(Na) - 2.75(Cr)-0.13(K)+4.10(BMI)+0.26(Age)+17.05$  
+Females: $Na_{24h}=5.07 + 0.34(Na) - 2.16(Cr)-0.09(K)+2.39(BMI)+2.35(Age)-0.03(Age^2)+12.82$  
+where Na is sodium (mmol/L), Cr is creatinine (mmol/L), K is potassium (mmol/L), BMI is body mass index (kg/m^2^) and age is expressed in years. The results of the equations in mmol/L were then multiplied by 23 to estimate 24-h sodium in mg. The 24-h sodium in mg was then used to apply the HEFI-2019 scoring algorithm.
+
+**Estimation of free sugar intake**\
+To estimate intake of free sugars, the total sugars content of food categories rich in natural sugars was subtracted from the intake of total sugars. The food categories considered for their contribution to the intake of natural sugars were vegetables, fruits, dairy and legumes. First, food codes from the *McCance and Widdowson* food composition table were retrieved for all single foods within the Oxford WebQ [@RN1365] as well as their serving sizes, proportion of free sugars and total sugars content. Second, the reported number of servings of all single foods was multiplied by their content in natural sugars. Third, free sugars were estimated as the difference between intake of total sugars and intake of natural sugars from vegetables, fruits, dairy foods and legumes. Based on all foods reported on all 24-h dietary recalls, the 5 main contributors to intake of natural sugars were `r knitr::combine_words(tolower(sugars_top[1:5,]$label))`. Additionally, for the first 24-h dietary recall completed, mean (SD) intakes of total, natural and free sugars were `r noquote(mean_sugtot)`, `r noquote(mean_sugnat)`, `r noquote(mean_sugfree)` grams/d. The ratio of mean free to mean total sugars was `r round(sugars_ratio[sugars_ratio$r24_no==1,]$Ratio,2)`.
+
+\newpage
+
+```{r tabhefi}
+
+# *********************************************************************** #
+#                      Prepare Supplementary Table                        #
+# *********************************************************************** #
+ 
+ stable_hefi2019 <-
+   readxl::read_xlsx(file.path(results_dir,"SupplTable_manual.xlsx"),sheet="hefi2019") %>% 
+   gt::gt(.)  %>% 
+   gt::cols_label(
+     no = "#",
+     name = "Component name",
+     measurement = "Measurement",
+     points = "Maximum Points",
+     unit = "Unit",
+     min = "Standard for minimum score",
+     max = "Standard for maximum score"
+   ) %>% 
+   gt::tab_style(
+     style = list(
+       cell_text(weight = "bold")  ),
+     locations = cells_column_labels(columns=everything())
+   ) %>% 
+   gt::tab_header(
+     title = md(paste0("**Supplementary Table ",stable_index,".** Healthy Eating Food Index (HEFI)-2019 components, points and standards for scoring"))) %>%
+   gt::tab_source_note(
+     source_note = "Table adapted from Brassard et al. Appl Physiol Nutr Metab. 2022. CCHS, Canadian Community Health Survey; CFG-2019, Canada's food guide 2019; HEFI-2019, Healthy Eating Food Index 2019; RA, Reference Amounts (amount of food usually eaten by an individual at one sitting); %E, percent of total energy.") %>% 
+   gt::tab_footnote(
+     footnote = "All vegetables and fruits regardless of saturated fat, sodium or free sugar content; excludes fruit juice (i.e., considered as sugary drinks in CFG-2019).",
+     locations = cells_body(columns=name,rows= 1)
+     ) %>%
+   gt::tab_footnote(
+     footnote = "Total foods include all foods consumed as well as beverages considered in protein foods (i.e., unsweetened milk and unsweetened plant-based beverages that contain protein); excludes all other beverages as well as solid fats, oils and spreads and culinary ingredients (e.g., spices and baking soda).",
+     locations = cells_body(columns=measurement,rows=c(1:2,4) )
+   ) %>%
+   gt::tab_footnote(
+     footnote = "Foods where the first ingredient is either whole grains or whole wheat, regardless of saturated fat, sodium or free sugar content.",
+     locations = cells_body(columns=name,rows= 3)
+   ) %>%
+   gt::tab_footnote(
+     footnote = "Foods where the first ingredient is a grain (whole or not) regardless of saturated fat, sodium or free sugar content.",
+     locations = cells_body(columns=measurement,rows= 3)
+   ) %>%
+   gt::tab_footnote(
+     footnote = "All protein foods regardless of fat, sodium or sugars content; excludes processed meats (i.e., not considered protein foods in CFG-2019) and sweetened milks (i.e., considered as sugary drinks in CFG-2019).",
+     locations = cells_body(columns=name,rows= 4)
+   ) %>%
+   gt::tab_footnote(
+     footnote = "All plant-based protein foods, regardless of saturated fat, sodium or free sugar content.",
+     locations = cells_body(columns=name,rows= 5 )
+   ) %>%
+   gt::tab_footnote(
+     footnote = "Unsweetened beverages include unsweetened coffee and tea, unsweetened milk and unsweetened plant-based beverages. Total beverages include water (plain or carbonated), coffee, tea, milk and plant-based beverages, fruit and vegetable juices, alcoholic drinks, artificially sweetened beverages and sugary drinks.",
+     locations = cells_body(columns=measurement,rows= 6)
+   )  %>%
+   gt::tab_footnote(
+     footnote = md("Approximately the **15th percentile** of intake based on data (single 24-h dietary recall) in Canadians from the 2015 CCHS – Nutrition."),
+     locations = cells_body(columns=min,rows= 7 )
+   ) %>%
+   gt::tab_footnote(
+     footnote = md("Corresponds to the **1st percentile** of unsaturated to saturated fats ratios among simulated diets developed to be fully consistent with all recommendations in CFG-2019. "),
+     locations = cells_body(columns=max,rows= 7 )
+   ) %>%
+   gt::tab_footnote(
+     footnote = md("Approximately the **85th percentile** of intake based on data (single 24-h dietary recall) in Canadians from the 2015 CCHS – Nutrition. "),
+     locations = cells_body(columns=min,rows= 8:9 )
+   ) %>%
+   gt::tab_footnote(
+     footnote = md("Standard for maximum points based on the Chronic Disease Risk Reduction for 14+ years (i.e., 2300 mg) over the **90th percentile** of usual energy intakes in respondents 2 y and older from the 2015 CCHS – Nutrition (i.e., approximately 2600 kcal)."),
+     locations = cells_body(columns=max,rows= 10 )
+   ) %>%
+   gtstyle(.,footnote_marker="numbers")
+
+# *********************************************************************** #
+#  Use <gtsave_select> function to print table directly or save as png    #
+# *********************************************************************** #
+  
+gtsave_select(stable_hefi2019,paste0("SupplTable ",stable_index,". hefi2019"),OUTPUT_WORD)  
+
+stable_index <- stable_index+1
+
+```
+
+\newpage
+
+## Classification of foods in the Oxford WebQ
+
+```{r classificationplot, fig.height=4, fig.width= 7, fig.cap="Distribution of unique foods in the Oxford WebQ according to the HEFI-2019 food categories. Foods that are mainly fats (e.g., oils and spreads) are considered as nutrients in the HEFI-2019 (not shown). HEFI-2019, Healthy Eating Food Index 2019"}
+
+# *********************************************************************** #
+#        Import latest food classification data, format and plot          #
+# *********************************************************************** #
+foodlist <- 
+      readxl::read_xlsx(file.path(food_dir,"Classification_detailed_12NOV2021.xlsx")) %>% 
+      dplyr::filter(variable_is_recoded!=1) %>% # remove generic names
+      dplyr::group_by(hefi2019_cat) %>% 
+      dplyr::summarize(freq=n()) %>%
+      dplyr::mutate(pct=freq/sum(freq),
+             pct100=round((pct*100),1),
+             n_pct=paste0(freq," (",round(pct100,1),"%)")
+      ) 
+
+# ********************************************** #
+#          Create labels for categories          #
+# ********************************************** #
+
+  hefi2019_cat_labels <- 
+    c(milk = "Cow milk",
+      other = "Other foods",
+      pfab = "Protein foods, animal",
+      pfpb = "Protein foods, plant",
+      plantbev = "Plant-based beverages with protein",
+      rg = "Non-whole grains",
+      ssbs = "Sugar-sweetened beverages, alcohol, fruit juice",
+      vf = "Vegetables and fruits",
+      water = "Water, coffee, tea",
+      wg ="Whole grains")
+
+  foodlist$hefi2019_cat_labels <- hefi2019_cat_labels  
+
+# ********************************************** #
+#                Generate figure                 #
+# ********************************************** #
+  
+distrib_food_oxford <-
+  foodlist %>%
+    ggplot2::ggplot(data=.,(aes(x=reorder(hefi2019_cat_labels,pct100,na.rm=TRUE),
+                                y=pct100))) +
+    ggplot2::coord_flip(ylim=c(0,max(foodlist$pct100)*1.2)) +
+    ggplot2::geom_col()+ 
+    ggplot2::geom_text(aes(label=n_pct),size=3,
+                       position=position_dodge(width=0.9), hjust=-0.1) +
+    ggplot2::labs(x=NULL,y='Proportion of total foods in the Oxford WebQ, %',caption=paste0("Total foods = ",sum(foodlist$freq)))+
+    ggplot2::theme_bw()
+
+# print 
+
+distrib_food_oxford
+
+```
+
+\newpage
+
+## Covariates
+
+Supplementary Table `r stable_index` presents the covariates and their functional forms used in the inverse probability weighting models or in the Cox regression models (HEFI-2019 total score and energy intake only). All covariates assessed on a continuous scale were *a priori* transformed with a restricted cubic spline function to address plausible nonlinearity.
+
+```{r tabcovar}
+
+# *********************************************************************** #
+#  Import detailed data on covariates (missing, source, function, ...)    #
+# *********************************************************************** #
+
+# 1. import missing data for each variable (imputation procedure)
+misspattern <-
+  haven::read_sas(file.path(results_dir,"imputation_excl2missing.sas7bdat")) 
+
+# 2. calculate total n missing for each variable
+missfreq <-
+  misspattern %>% 
+  dplyr::summarise(across((2:ncol(misspattern)),
+  # For rows with missing values, count sum Freq of missing values for each variables
+                          ~ ifelse(is.na(.x),sum(Freq[is.na(.x)]),NA),
+                          .names ="{col}")) %>% 
+  tidyr::pivot_longer(cols=c(1:ncol(.)),
+                      names_to="varname",
+                      values_to = "freq") %>% 
+  # ensure that counts are kept (except for variables without missing values)
+  dplyr::arrange(desc(freq)) %>% 
+  dplyr::distinct(varname,.keep_all=TRUE) %>% 
+  dplyr::mutate(
+    N = sum(misspattern$Freq), # total number of observations
+    pct = (freq/N),
+    pct100 = scales::number(pct*100,accuracy=0.01),
+    n_percent = ifelse(freq>0,paste0(freq," (",pct100,"%)"),NA)
+  ) 
+  
+total_n <- scales::number(sum(misspattern$Freq),big.mark=",")
+
+# 3. make actual table
+ stable_covar <-
+   readxl::read_xlsx(file.path(results_dir,"SupplTable_manual.xlsx"),sheet="variables") %>% 
+   dplyr::left_join(.,missfreq) %>% 
+   gt::gt(.) %>% 
+     gt::cols_hide(c(category,varname,starts_with("causal"),freq,N,pct,pct100)) %>%
+     gt::cols_label(
+       no = md("**No**"),
+       name=md("**Variable name**"),
+       ukb_varname=md("**UK Biobank code**"),
+       modeling = md("**Functional form**"),
+       n_percent = md("**Missing data, n (%)**")
+     )  %>% 
+   gt::sub_missing(
+     columns=n_percent,
+     missing_text= "-") %>% 
+   gt::tab_header(
+     title = md(paste0("**Supplementary Table ",stable_index,".** Covariate names, UK Biobank codes and functional forms"))) %>% 
+   gt::tab_footnote(
+     footnote = "All variables were measured at the baseline visit, unless otherwise indicated. HEFI-2019, Healthy Eating Food Index-2019. NA, not applicable",
+     location = cells_title("title")) %>%
+   gt::tab_footnote(
+     footnote = paste0("A total of ",round(100-(misspattern[1,]$Percent),1),"% of data was missing in the included sample, which were imputed once by chained equations. We used a discriminant function for unordered categorical variables, logistic for binary or ordered categorical variables and predictive mean matching for continuous variables."),
+     location = cells_column_labels("n_percent")) %>% 
+   gt::tab_footnote(
+     footnote = ("Age was calculated as the age at the first 24-h dietary recall completion."),
+     locations = cells_body(columns=name,rows= 2 )
+   ) %>% 
+   gt::tab_footnote(
+     footnote = ("Assessed at the online follow-up (i.e., completion of the 24-h dietary recall)."),
+     locations = cells_body(columns=name,rows= c(15, 18:19) )
+   ) %>% 
+     gtstyle(.)
+   
+
+# *********************************************************************** #
+#  Use <gtsave_select> function to print table directly or save as png    #
+# *********************************************************************** #
+  
+gtsave_select(stable_covar,paste0("SupplTable ",stable_index,".SupplTable covar"),OUTPUT_WORD)
+
+stable_index <- stable_index+1
+
+```
+
+\newpage
+
+### Plausibility of self-reported energy intakes
+
+```{r plausible-data}
+
+# *********************************************************************** #
+#                   Import data on cut-offs derivation                    #
+# *********************************************************************** #
+
+plausibleCV <-
+  haven::read_sas(file.path(results_dir,"plausible_cv.sas7bdat")) %>% 
+  # Add format to SUBCV variable (coding was done in sas code #2)
+  dplyr::mutate(
+    SUBCV_FMT = case_when(
+      SUBCV == 0 ~ "All" ,
+      SUBCV == 1 ~ "BMI <25.0 kg/m\u00B2, Males, 40 to 50 y",
+      SUBCV == 2 ~ "BMI <25.0 kg/m\u00B2, Males, 51 to 70 y",
+      SUBCV == 3 ~ "BMI <25.0 kg/m\u00B2, Males, 71 y+",
+      SUBCV == 4 ~ "BMI <25.0 kg/m\u00B2, Females, 40 to 50 y",
+      SUBCV == 5 ~ "BMI <25.0 kg/m\u00B2, Females, 51 to 70 y",
+      SUBCV == 6 ~ "BMI <25.0 kg/m\u00B2, Females, 71 y+",
+      SUBCV == 7 ~ "BMI \u226525.0 kg/m\u00B2, Males, 40 to 50 y",
+      SUBCV == 8 ~ "BMI \u226525.0 kg/m\u00B2, Males, 51 to 70 y",
+      SUBCV == 9 ~ "BMI \u226525.0 kg/m\u00B2, Males,71 y+",
+      SUBCV ==10 ~ "BMI \u226525.0 kg/m\u00B2, Females, 40 to 50 y",
+      SUBCV ==11 ~ "BMI \u226525.0 kg/m\u00B2, Females, 51 to 70 y",
+      SUBCV ==12 ~ "BMI \u226525.0 kg/m\u00B2, Females, 71 y+",
+    )) %>% 
+  # Split SUBCV_FMT to have 3 unique columns with characteristics
+ tidyr::separate(.,col=SUBCV_FMT,sep = ',',into = c("bmic","sex","agec")) %>% 
+  dplyr::mutate(
+    #bmic = ifelse(bmic=="All"," ",bmic),
+    sex  = ifelse(is.na(sex)," ",sex),
+    agec = ifelse(is.na(agec),"All",agec),
+  )
+
+  #note: warning caused by the "all" sample row, i.e., no subgroup
+
+
+```
+
+Self-reported energy intakes of all 24-h dietary recalls were compared with predicted energy requirements to assess their plausibility [@RN508]. The physical activity level in predictive energy requirements equations was assumed to be sedentary for all participants. Cut-offs to define plausible energy intakes were calculated as follows:
+
+$$\pm 1SD=\sqrt{(CV^2_{rEI}/d+CV^2_{pER}+CV^2_{mTEE})}$$
+
+where $CV^2_{rEI}$ is the within-individual coefficient of variation of self-reported energy intake, $d$ is the number of 24-h dietary recalls completed, $CV^2_{pER}$ is the between-individual coefficient of variation of predicted energy requirements and $CV^2_{mTEE}$ is the coefficient of variation in measured total energy expenditure (mTEE; from @RN241). The resulting cut-offs used to assess the plausibility of reported energy intakes are presented in Supplementary Table `r stable_index`. For example, among all participants, and based on a SD of `r noquote(scales::percent(plausibleCV[1,]$SD1))`, participants with a self-reported energy intake to predicted energy requirement between `r 1-round(plausibleCV[1,]$SD1,2)` and `r 1+round(plausibleCV[1,]$SD1,2)` were considered to have plausible energy intake data.
+
+```{r tab-plausible}
+
+# note: <plausibleCV data imported in chunk above
+
+# *********************************************************************** #
+#                   Prepare data for table using gt()                     #
+# *********************************************************************** #
+
+stable_plausible <- 
+  plausibleCV %>% 
+  dplyr::mutate(
+    N = scales::number(N,big.mark=",")
+     ) %>% 
+  dplyr::group_by(bmic,sex) %>% 
+  gt::gt(.) %>% 
+  gt::cols_move_to_start(c(agec,N,nr24)) %>% 
+  gt::cols_hide(c(SUBCV,SD15,SD2,starts_with("mean"))) %>% 
+  gt::fmt_number(nr24, decimals=1) %>% 
+  gt::fmt_percent(starts_with("CV"), decimals=1) %>% 
+  gt::fmt_percent(starts_with("SD"), decimals=0) %>% 
+  gt::tab_spanner(
+    label = md("**Coefficient of variation**"),
+    columns = starts_with("CV")
+  ) %>% 
+  gt::cols_label(
+    agec = "Stratum",
+    N = "Sample size, n",
+    nr24 = "24-h recall completed, n",
+    CVrEI = "Self-reported energy intake",
+    CVpER = "Predicted energy requirements",
+    CVmTEE = "Biological variability",
+    SD1 = "\u00B11 SD cut-off"
+  ) %>% 
+  gt::tab_header(
+    title = md(paste0("**Supplementary Table ",stable_index,".** Estimation of cut-off to determine the plausibility of self-reported energy intakes in adults from the UK Biobank, by BMI, sex and age categories"))) %>%
+  gt::tab_style(
+      style = list(
+        cell_text(weight = "bold")  ),
+      locations = cells_column_labels(columns = c(agec,N,nr24,SD1))
+    ) %>% 
+  gt::tab_footnote(
+    footnote = "The within-individual coefficients of variation for total energy intakes measured using the 24-h dietary recalls was determined using the National Cancer Institute univariate method and log-transformed data. BMI, body mass index.",
+    locations = cells_title("title")) %>% 
+  gt::tab_footnote(
+    footnote = "The normal day-to-day variation in objectively measured total energy expenditure was obtained from Black & Cole, Eur J Clin Nutr 2000.",
+    locations = cells_column_labels(CVmTEE)) %>% 
+     gtstyle(.)
+   
+
+# *********************************************************************** #
+#  Use <gtsave_select> function to print table directly or save as png    #
+# *********************************************************************** #
+  
+gtsave_select(stable_plausible,paste0("SupplTable ",stable_index,". plausible"),OUTPUT_WORD)
+
+stable_index <- stable_index+1
+
+
+```
+
+\newpage
+
+## Statistical analyses
+
+### Steps 1 and 2: Modelling of dietary constituents
+
+```{r energy-distrib}
+
+# *********************************************************************** #
+#         Energy distribution based on NCI descriptive analysis           #
+# *********************************************************************** #
+
+energy_distrib <- 
+  haven::read_sas(file.path(nci_mcmc_distrib_dir,"distribraw_w0.sas7bdat")) %>% 
+  dplyr::filter(varname=="energy")
+
+# *********************************************************************** #
+#                    Under-reporting of energy intake                     #
+# *********************************************************************** #
+
+energy_reporting <-
+  haven::read_sas(file.path(results_dir,"table1_reporting.sas7bdat")) %>% 
+  dplyr::filter(id==0)
+
+
+```
+
+
+Dietary constituents of the HEFI-2019 were modelled using the National Cancer Institute (NCI) multivariate method [@Zhang2011] to mitigate within-individual random errors [@Thompson2015]. This method estimates usual (long-term) intakes hence mitigating to a large extent the influence of any given 24-h recall reflecting days with very low or very high energy intakes. From our experience, 24-h recall with zero energy intake cannot effectively contribute to estimating usual intakes based on the NCI method. However, it is hard to draw the line at which a given energy level in a 24-h recall is not enough in a large study like the UK Biobank with many repeated 24-h dietary calls (up to 5) and many participants (>130,000). 24-h dietary recall data were included in the NCI modeling of usual intakes if the reported energy intake was `r noquote(paste0("\u2265"))`100 kcal, an arbitrary cut-off. As few as 114 recalls were excluded due to reported energy intake below 100 kcal on a total of over 450,000 24-h dietary recalls completed. Once modelled to consider random errors, the estimated 1^st^ percentile of (modelled) usual energy intakes was approximately `r round(energy_distrib$Pctile1,-1)` kcal. Finally, under-reporting of energy intake, approximately `r round(energy_reporting[1,]$Percent,1)`% of participants in the eligible sample, is not higher than previously found in nutrition survey (Supplementary Table 11).
+
+First, the multivariate method was used to derive distribution of HEFI-2019 scores, based on usual intakes. In this first model, the covariates were indicators of sequence of 24-h dietary recall (second, third, fourth or fifth), indicator of weekend 24-h dietary recall (Friday, Saturday, or Sunday), age groups (\<51 y, 51 to \< 71 y, 71 y or older) and an indicator of CVD outcome or death censoring during follow-up. The measurement error model was stratified by sex. Refined-grain foods, whole-grain foods, plant-based protein foods, unsweetened plant-based beverages and beverages not recommended in the 2019 CFG (i.e., sugary drinks, artificially sweetened beverages, fruit juices, sweetened milk and plant-based beverages, alcohol) were considered as episodically consumed in the multivariate method, while the remaining foods and nutrients were considered as daily consumed. A total of 500 simulations were performed in the Monte Carlo simulation step of the multivariate method. Simulations from both strata (i.e., males and females) were combined before estimating distributions.\
+
+Second, the multivariate method was used to simulate usual intakes at the participant level to obtain measurement-error-corrected regression coefficients in diet-outcome models [@Zhang2011]. The covariates were those used to mitigate confounding (i.e., `r knitr::combine_words(tolower(covar_list[1:(length(covar_list)-1)]))`) and the predicted 24-h sodium intake based on the urine assay. The dietary constituents were modelled as described above, except for unsweetened plant-based beverages, which had to be added to larger food categories (plant-based protein foods and unsweetened beverages) due to model non-convergence. A total of 1,000 simulations (pseudo-individuals) were performed in the Monte Carlo simulation step of the multivariate method. The total HEFI-2019 score was calculated among pseudo-individuals after applying the HEFI-2019 scoring algorithm. The total HEFI-2019 score and energy intake were both transformed *a priori* with a restricted cubic spline function including 4 knots (i.e., the 5^th^, 35^th^, 65^th^ and 95^th^ percentile of the score distribution based on usual intakes) using a SAS macro by Desquilbet and Mariotti @RN597. Simulated usual intakes and derived variables were then averaged across the 1,000 pseudo-individuals before further analysis.\
+
+### Step 3: Adjustments using inverse probability weighting (IPW)
+
+The use of IPW instead of more traditional covariate adjustment was justified by the simplicity of making adjusted survival curves [@Cole2004], to mitigate the potential bias due to adjustments for variables that may not always be a confounder (e.g., body mass index; @Hernán2004) and to account for informative censoring [@RN1384; @Hernán2004]. The inverse probability of "treatment" weights (IPTW) were estimated via a linear regression model including all covariates and assuming a normal distribution for the HEFI-2019 [@Cole2008; @RN1280]. Informative censoring due to mortality (i.e., competing events) was accounted with inverse probability of censoring weighting (IPCW) estimated via logistic regression. The IPTW and IPCW weights were both stabilized to the sample size and then multiplied to obtain combined weights for analysis. The combined (stabilized) weights equation is:
+
+$$SW^{X,C} = SW^{X} \times SW^{C} = \frac{f(X_0)}{f(X_0|L_0)} \times \frac{Pr[C=0|X_0]}{Pr[C=0|X_0,E_0,L_0]}$$
+
+Where $SW^{X,C}$ are combined weights; $SW^{X}$ are stabilized IPTW; $SW^{C}$ are stabilized IPCW; $X_0$ is the total HEFI-2019 score measured at the start of follow-up; $E_0$ is energy intake measured at the start of follow-up; $L_0$ is a vector of covariates measured at the start of follow-up (i.e., confounders); and $C$ is an indicator variable for any censoring during the follow-up. $f(\cdot)$ for  $SW^{X}$ is a probability density function assuming normal (Gaussian) density. The denominator and the numerator of both IPTW and IPCW are estimated in separate models. For IPTW ($SW^{X}$), the denominator is estimated using a linear regression model of the HEFI-2019 score on covariates. Accordingly, $f(X_0│L_0)$ is a probability density function assuming normal (Gaussian) density with mean $\mu_{L_0}=f(X_0│L_0)$ and constant variance $\sigma_{DEN}^2$ [@RN1280]. The numerator is also estimated using a linear regression model and $f(X_0)$ is also a probability density function assuming normal (Gaussian) density with mean $\mu=f(X_0)$ and constant variance $\sigma_{NUM}^2$. For IPCW ($SW^{C}$), the denominator is estimated using a logistic regression model of the censoring indicator on the HEFI-2019 score, energy intake and all covariates. The logistic regression model predicted probabilities are then generated to obtain the probability of remaining in the study for each participant (i.e., uncensored, $Pr[C=0|X_0,E_0,L_0]$). 
+
+Under the assumption that there is no unmeasured confounders, that models for estimating weights are correctly specified and that there was no measurement error, applying the combined weights to the study participants yields a pseudo-population in which the HEFI-2019 score distribution is independent of confounders [@Cole2008; @Robins2000] and without informative censoring (i.e., competing events; @RN1384). However, the assumption of no unmeasured confounders can never be fully verified as in all observational studies. Whether this assumption is satisfied depends on the extent to which all relevant variables were considered to mitigate confounding (Supplementary Table 4). When estimating IPW, the use of flexible modelling strategies for continuous covariates is recommended to consider nonlinear relationships [@RN1361]. Restricted cubic spline transformations were used in the present study, which should contribute to better covariate balance and to mitigate bias [@RN1361]. Dietary intakes measured with the 24-h dietary recall instrument are mostly affected by random measurement errors. However, the NCI multivariate method was used to account for these random errors [@Zhang2011], which could otherwise cause bias [@Brakenhoff2018]. 
+
+
+The **Supplementary Figure** \@ref(fig:swbalance) presents the relationship between the HEFI-2019 score and selected confounders with and without weighting by the inverse probability of treatment weights ($SW^{X}$). As expected, weighting importantly attenuated the standardized regression coefficients between the total HEFI-2019 score and confounders.\
+
+```{r swbalance, fig.height=6.75,fid.width=14,fig.cap="Standardized regression coefficients from the linear regression of the total HEFI-2019 score on baseline covariate, without weighting (None) and with weighting (Normal). Reference level of categorical variables are omitted. BMI, body mass index; Dietsuppl, use of dietary supplement; Employ, employment situation; Famhist, familial history of cardiovascular disease; Hrt, hormone replacement therapy; Meno, menopausal status; Physact, physical activity; Roh, alcohol habits; Smk, smoking status."}
+
+# *********************************************************************** #
+#          Relationship between confounders and HEFI-2019 score           #
+# *********************************************************************** #
+
+# ********************************************** #
+#                1) Import data                  #
+# ********************************************** #
+
+ sw_balance_t <-
+   haven::read_sas(file.path(results_dir,"ipw_balance.sas7bdat")) %>% 
+    # keep IPW of interest (i.e., none and normal), remove reference category for class var.
+    dplyr::filter(IPW %in% c("none","sw_a"),StandardizedEst!=0) %>%
+    # format variable names so they are decent (capital first, var:level, no 0)
+    dplyr::mutate(Parameter=stringr::str_to_title(Parameter),
+                  Parameter=sub(' ', ":",Parameter),
+                  Parameter=gsub('[0]','',Parameter)
+                  )
+
+  ## make factor variable of parameter, ordered by StandardizedEst with no IPW applied
+  ordered <- 
+    sw_balance_t %>%
+    dplyr::filter(IPW=="none") %>% 
+    dplyr::select(Parameter,StandardizedEst) %>% 
+    arrange(StandardizedEst) 
+  
+  ## add factor to data, now considering orderd value of StandardizedEst
+  sw_balance_t <-
+    sw_balance_t %>% 
+    dplyr::mutate(
+      Parameter_f = factor( Parameter, levels = ordered$Parameter)
+    )
+  
+  ## delete temp data
+  rm(ordered)
+
+# ********************************************** #
+#          2) Plot Std regression coef.          #
+# ********************************************** #
+
+sw_balance_plot <- 
+sw_balance_t %>% 
+  ggplot2::ggplot(.,aes(x=Parameter_f,y=StandardizedEst),group=IPW) +
+  ggplot2::geom_hline(yintercept=0, linetype=3, color="black") +
+  ggplot2::geom_point(aes(shape=IPW,colour=IPW,legend=NULL)) +
+  ggplot2::scale_color_manual("Weighting",labels=c("None","Normal"),values=MetBrewer::met.brewer("Juarez",n=2))+
+  ggplot2::scale_shape_manual("Weighting",labels=c("None","Normal"),values=c(16,17)) +
+  ggplot2::coord_flip(ylim=c(-0.3,0.3)) +
+  ggplot2::theme_bw() +
+  ggplot2::theme( ## remove the vertical grid lines
+    panel.grid.major.x = element_blank() ,
+    panel.grid.minor.x = element_blank() ,
+    ## explicitly set the horizontal lines (or they will disappear too)
+    panel.grid.major.y = element_line(color="gray", linetype = 3),
+    axis.text.y = element_text(size=rel(1.1),color="black"),
+    axis.text.x = element_text(size=rel(1.1),color="black"),
+    ) + 
+  ggplot2::labs(x="Baseline covariates",y="Standardized regression coefficient")
+
+sw_balance_plot
+
+# ********************************************** #
+#                 3) Save figure                 #
+# ********************************************** #
+
+  ggplot2::ggsave(file.path(suppl_dir,"Fig_sw_balance.pdf"),
+        plot=sw_balance_plot, dpi=300, width=8,height=10, units="in",scale=0.95,device = cairo_pdf)
+
+  ggplot2::ggsave(file.path(suppl_dir,"Fig_sw_balance.png"),
+         plot=sw_balance_plot, dpi=300, width=8,height=10, units="in",scale=0.95)
+
+```
+
+### Step 4: outcome model for incident CVD 
+
+The Cox proportional hazards regression model was used to analyze the relationship between the total HEFI-2019 score based on usual intakes and incident CVD. Accordingly, the outcome was modelled as:
+
+$$ \lambda (t|X_0,E_0) = \lambda _0(t) \cdot  exp(\beta_{X_0} X_0 + \beta_{E_0} E_0) $$
+However, contrasts in counterfactual hazards generally cannot have a causal interpretation [@RN1265; @RN1384]. Thus, the Cox regression parameter estimates from the outcome model were used to generate survival curves reflecting each predetermined percentile of the HEFI-2019 scores distribution determined in step 1. In other words, the Cox regression model was used to estimate the cumulative survival probability had all participants had a HEFI-2019 score at the predetermined percentile value and at constant energy intake. To derive the survival curves at predetermined HEFI-2019 score percentiles, we substituted $X_0$ with the predetermined HEFI-2019 score in:
+
+$$S(t)=[S_0(t)]^{\exp (\beta_{X_0}X_0+\beta_{E_0}E_0)}$$
+For energy intake at the start of follow-up ($E_0$), the mean energy intake in this sample was used for all survival curves (i.e., `r exposure[1,]$energy*1000` kcal), ensuring that energy intake remains constant across all curves. Concretely, the survival curve at the end of follow-up (137 months) at the 90^th^ percentile of the HEFI-2019 score distribution (`r exposure[exposure$p==90,]$HEFI2019_TOTAL_SCORE` points) is obtained with:
+
+$$S(t_{137})=[S_0(t)]^{\exp (\beta_{X_0}58.1+\beta_{E_0}2100)}$$
+Risks are then calculated as $1-S(t_{137})$. Finally, contrasts in counterfactual risks are derived by comparing risks at at the predetermined percentiles of the HEFI-2019 scores distribution. Of note, restricted cubic spline transformations for the HEFI-2019 and total energy intake are not shown in the equations above.
+
+# Supplementary results
+
+## Characteristics of participants
+
+```{r tabincluded-vs-excluded }
+
+# *********************************************************************** #
+#       Characteristics of participants that were included vs. not        #
+# *********************************************************************** #
+
+# ********************************************** #
+#                1) Import data                  #
+# ********************************************** #
+
+# flowchart data to output samples sizes
+
+n_included <-
+  haven::read_sas(file.path(results_dir,"flowchart.sas7bdat")) %>% 
+  dplyr::slice(nrow(.)) %>% 
+  dplyr::mutate(included_fmt=scales::number(included,big.mark = ",")) %>% 
+  dplyr::pull(included_fmt)
+
+n_withdrawn <- 
+   haven::read_sas(file.path(results_dir,"flowchart.sas7bdat")) %>% 
+   dplyr::filter(withdrawn==0) %>% 
+   dplyr::pull(excluded)
+  
+n_excluded <-
+  haven::read_sas(file.path(results_dir,"flowchart.sas7bdat")) %>% 
+  dplyr::slice(nrow(.)) %>% 
+  dplyr::mutate(excluded_fmt=scales::number(excluded-n_withdrawn,big.mark = ",")) %>% 
+  dplyr::pull(excluded_fmt)
+
+  stable_excl_data <- 
+    haven::read_sas(file.path(results_dir,"table1_byincluded.sas7bdat")) %>% 
+    # remove trailing blanks
+      dplyr::mutate(
+      Category =stringr::str_trim(Category, side = "left"),
+      all      =stringr::str_trim(all, side = "left") ,
+      Level    =stringr::str_trim(Level, side = "right")
+    )
+  
+# ********************************************** #
+#        2) Make label for all variables         #
+# ********************************************** #
+  
+  stable_excl_data$Category_label <- NA
+  stable_excl_data$Category_label[stable_excl_data$Category=='ageatbaseline'] <- 'Age at baseline assessment, y'
+  stable_excl_data$Category_label[stable_excl_data$Category=='sedentary0'] <- 'Sedentary time, h/d'
+  stable_excl_data$Category_label[stable_excl_data$Category=='chol0'] <- 'Total cholesterol, mmol/L'
+  stable_excl_data$Category_label[stable_excl_data$Category=='ldlc0'] <- 'Low-density lipoprotein cholesterol, mmol/L'
+  stable_excl_data$Category_label[stable_excl_data$Category=='hdlc0'] <- 'High-density lipoprotein cholesterol, mmol/L'
+  stable_excl_data$Category_label[stable_excl_data$Category=='sbp0'] <- 'Systolic blood pressure, mm Hg'
+  stable_excl_data$Category_label[stable_excl_data$Category=='dbp0'] <- 'Diastolic blood pressure, mm Hg'
+  #stable_excl_data$Category_label[stable_excl_data$Category=='bmi0'] <- 'Body mass index, kg/m2'
+  stable_excl_data$Category_label[stable_excl_data$Category=='sex_num'] <- 'Sex'
+  stable_excl_data$Category_label[stable_excl_data$Category=='region'] <- 'Region'
+  stable_excl_data$Category_label[stable_excl_data$Category=='british'] <- 'White/british ethnic background'
+  stable_excl_data$Category_label[stable_excl_data$Category=='famhist0'] <- 'Familial history of cardiovascular disease'
+  stable_excl_data$Category_label[stable_excl_data$Category=='education0'] <- 'Education level'
+  stable_excl_data$Category_label[stable_excl_data$Category=='employ0'] <- 'Employment situation'
+  stable_excl_data$Category_label[stable_excl_data$Category=='cat_deprivation'] <- 'Townsend deprivation index'
+  stable_excl_data$Category_label[stable_excl_data$Category=='roh0'] <- 'Alcohol consumption habits'
+  stable_excl_data$Category_label[stable_excl_data$Category=='smk0'] <- 'Smoking habits'
+  stable_excl_data$Category_label[stable_excl_data$Category=='bmi0'] <- 'Body mass index'
+  stable_excl_data$Category_label[stable_excl_data$Category=='physact0'] <- 'Physical activity level'
+  stable_excl_data$Category_label[stable_excl_data$Category=='dietchange0'] <- 'Major dietary habits change in the past 5 years'
+  stable_excl_data$Category_label[stable_excl_data$Category=='dietsuppl'] <- 'Dietary supplement use'
+  stable_excl_data$Category_label[stable_excl_data$Category=='rx0'] <- 'Medication use'
+  stable_excl_data$Category_label[stable_excl_data$Category=='meno0'] <- 'Menopausal status (female only)'
+  stable_excl_data$Category_label[stable_excl_data$Category=='hrt0'] <- 'Hormone replacement therapy (female only)'
+  stable_excl_data$Category_label[stable_excl_data$Category=='riskfactor'] <- 'Cardiovascular disease risk factor'
+  stable_excl_data$Category_label[stable_excl_data$Category=='reporter_num'] <- 'Plausibility of reported energy intakes'
+  
+  stable_excl_data$Category_label[stable_excl_data$Category=='r24_repeat'] <- 'Two or more 24-h dietary recalls completed'
+  
+# *********************************************************************** #
+#                      3) Generate table with gt()                        #
+# *********************************************************************** #
+  stable_excl <-
+  # ********************************************** #
+  #               3.1. Prepare data                #
+  # ********************************************** #
+    stable_excl_data %>% 
+    # remove continuous variables not of main interest and needless levels
+    dplyr::filter(! (Category %in% c("chol0", "ldlc0", "hdlc0", "sbp0", "dbp0")),Level!="No") %>% 
+    # drop previous `category` which has been replaced with labels
+    dplyr::select(Category_label,Level,included_0,included_1) %>% 
+    dplyr::mutate(
+      # Dont dispay `yes` (ie, needless)
+      #Level=ifelse(Level=="Yes","",Level),
+      # add % sign for n (percent) - can be omitted
+        #all = ifelse(Level!="Mean (SD)",gsub(')','%)',all),all),
+      included_0 = ifelse(Level!="Mean (SD)",gsub(')','%)',included_0),included_0),
+      included_1 = ifelse(Level!="Mean (SD)",gsub(')','%)',included_1),included_1)
+      ) %>% 
+    # group for easier reading
+    dplyr::group_by(Category_label) %>% 
+  # ********************************************** #
+  #               3.2. Actual table                #
+  # ********************************************** #
+    gt::gt(.) %>%
+    gt::cols_label(
+      Level = md("**Characteristics**"),
+      included_0 = paste0("Excluded,\n n=",n_excluded),
+      included_1 = paste0("Included,\n n=",n_included)
+      ) %>% 
+    gt::tab_style(
+          style = cell_text(align = "left", indent = px(20)),
+          locations = cells_body(columns=c(1:2))
+      ) %>%  
+  gt::tab_header(
+    title = md(paste0("**Supplementary Table ",stable_index,".** Baseline characteristics of UK Biobank participants, by inclusion status in the present study"))) %>%
+  gt::tab_footnote(
+    footnote = "Values are mean (SD) or n (%). Frequencies may not sum to the total number of participants due to missing data.",
+    location = cells_title("title")) %>% 
+   gtstyle(.)
+
+# *********************************************************************** #
+#  Use <gtsave_select> function to print table directly or save as png    #
+# *********************************************************************** #
+  
+gtsave_select(stable_excl,paste0("SupplTable ",stable_index,". included_excluded"),OUTPUT_WORD)  
+
+stable_index <- stable_index+1
+
+  
+
+```
+
+\newpage
+
+## Dietary intakes
+
+```{r tab-mean-rawdiet}
+
+# *********************************************************************** #
+#      Component distribution VS. quarter of total HEFI-2019 score        #
+# *********************************************************************** #
+
+  ## quarter labels
+  mcmc_q_val <- 
+    haven::read_sas(file.path(nci_mcmc_distrib_dir,"catscorelabel.sas7bdat"))
+
+# *********************************************************************** #
+#    Wide data (food, nutrient, density, component), all participants     #
+# *********************************************************************** #
+
+  ## import data
+  mcmc_distrib_all_w <- 
+    haven::read_sas(file.path(nci_mcmc_distrib_dir,"distribraw_w0.sas7bdat")) %>%
+    dplyr::select(varname,Mean,StdDev)
+
+  ## For the purpose of rounding and classification, code variable type
+     mcmc_distrib_all_w$type <- NA
+     mcmc_distrib_all_w$type [ mcmc_distrib_all_w$varname %in% c(comp)] <- "Component"
+     mcmc_distrib_all_w$type [ mcmc_distrib_all_w$varname %in% c(density)] <- "Density"
+     mcmc_distrib_all_w$type [ mcmc_distrib_all_w$varname %in% c(beverage)] <- "Beverage"
+     mcmc_distrib_all_w$type [ mcmc_distrib_all_w$varname %in% c(nutrient)] <- "Nutrient"
+     mcmc_distrib_all_w$type [ mcmc_distrib_all_w$varname %in% c(food)] <- "Food"
+   
+  ## make mean (SD)
+    mcmc_distrib_all_w <-
+      mcmc_distrib_all_w %>% 
+      dplyr::mutate(
+       # make mean (SD) variable
+        mean_sd = case_when(
+          type == "Food" ~ makeEstimate(Mean,StdDev,0.1),
+          type == "Density" ~ makeEstimate(Mean,StdDev,0.1),
+          type == "Beverage" ~ makeEstimate(Mean,StdDev,1),
+          type == "Nutrient" ~ makeEstimate(Mean,StdDev,1),
+          type == "Component" ~ makeEstimate(Mean,StdDev,0.1)
+          )
+      ) %>% 
+    dplyr::select(varname,type,mean_sd) %>% 
+    dplyr::rename(all=mean_sd)
+
+# *********************************************************************** #
+#      Wide data (food, nutrient, density, component), by catscore        #
+# *********************************************************************** #
+
+  mcmc_distrib_q_w <- 
+    haven::read_sas(file.path(nci_mcmc_distrib_dir,"distriball_w_catscore0.sas7bdat")) %>%
+    # keep only extremes (q4 vs. q1), and keep hefi food categories
+    dplyr::filter(catscore<9000 ) %>% 
+    dplyr::select(varname,catscore,Mean,StdDev)
+  
+    ## For the purpose of rounding and classification, code variable type
+    mcmc_distrib_q_w$type <- NA
+    mcmc_distrib_q_w$type [mcmc_distrib_q_w$varname %in% c(comp)] <- "Component"
+    mcmc_distrib_q_w$type [mcmc_distrib_q_w$varname %in% c(density)] <- "Density"
+    mcmc_distrib_q_w$type [mcmc_distrib_q_w$varname %in% c(beverage)] <- "Beverage"
+    mcmc_distrib_q_w$type [mcmc_distrib_q_w$varname %in% c(nutrient)] <- "Nutrient"
+    mcmc_distrib_q_w$type [mcmc_distrib_q_w$varname %in% c(food)] <- "Food"
+    mcmc_distrib_q_w$type [mcmc_distrib_q_w$varname %in% "HEFI2019_TOTAL_SCORE"] <- "Total"
+  
+    mcmc_distrib_q_w <-
+      mcmc_distrib_q_w %>% 
+      dplyr::mutate(
+       # make mean (SD) variable
+        mean_sd = case_when(
+          type == "Food" ~ makeEstimate(Mean,StdDev,0.1),
+          type == "Density" ~ makeEstimate(Mean,StdDev,0.1),
+          type == "Beverage" ~ makeEstimate(Mean,StdDev,1),
+          type == "Nutrient" ~ makeEstimate(Mean,StdDev,1),
+          type == "Component" ~ makeEstimate(Mean,StdDev,0.1),
+          type == "Total" ~ makeEstimate(Mean,StdDev,0.1)
+          )
+      ) %>% 
+    dplyr::select(varname,type,catscore,mean_sd) %>% 
+    tidyr::pivot_wider(names_from=catscore,names_prefix="catscore",values_from=mean_sd) 
+
+# *********************************************************************** #
+#               1. Prepare data for table of food intakes                 #
+# *********************************************************************** #
+  
+# Make list of dietary constituents and their label
+dietary_constituents_list <- c('vf', 'wg', 'rg', 'pfab', 'pfpb', 'other', 'water', 'milk', 'plantbev', 'ssbs', 'mufa', 'pufa', 'sfa', 'SFA_PERC', 'sugars_free', 'SUG_PERC', 'urine_na_24h', 'energy')
+
+dietary_constituents_label <- c('Vegetables and fruits, servings/d',	'Whole-grain foods, servings/d',	'Non-whole grain foods, servings/d',	'Protein, animal-based, servings/d',	'Protein, plant-based, servings/d',	'Other low nutritive value foods, servings/d',	'Water, coffee and tea, ml/d',	'Milk, ml/d',	'Soy beverage, ml/d',	'SSBs, alcohol and fruit juice, ml/d',	'MUFA, g',	'PUFA, g',	'SFA, g',	'SFA, %E',	'Free sugars, g',	'Free sugars, %E',	'Predicted 24-h sodium, mg',	'Energy, kcal')
+
+# Merge 'by catscore' and 'all' data, keep only dietary constituents of interest (i.e., removes comp+RATIO)
+mcmc_distrib_q_wf <-
+  mcmc_distrib_q_w %>% 
+  dplyr::left_join(.,mcmc_distrib_all_w) %>% 
+  dplyr::filter(varname %in% c(dietary_constituents_list))
+
+# factorize for the purpose of ordering
+mcmc_distrib_q_wf$varname_f <- factor(mcmc_distrib_q_wf$varname,
+                                     levels=dietary_constituents_list,
+                                     labels=dietary_constituents_label)
+
+# *********************************************************************** #
+#                      2. Generate table with gt()                        #
+# *********************************************************************** #
+
+stable_rawdiet <- 
+  mcmc_distrib_q_wf %>% 
+  dplyr::arrange(varname_f) %>% 
+  dplyr::select(-c(type,varname)) %>% 
+  gt::gt(.) %>% 
+  gt::cols_move_to_start(c(varname_f,all)) %>% 
+  gt::tab_spanner(
+    columns = c(catscore1,catscore2,catscore3,catscore4),
+    label = md("**Quarter of HEFI-2019 total score**")
+  ) %>% 
+  gt::cols_label(
+    varname_f = md("**Dietary constituents**"),
+    all = paste0("All,\n n=",flowchart_data[nrow(flowchart_data),]$included),
+    catscore1 = mcmc_q_val[1,2],
+    catscore2 = mcmc_q_val[2,2],
+    catscore3 = mcmc_q_val[3,2],
+    catscore4 = mcmc_q_val[4,2]
+  ) %>%
+  gt::tab_style(
+      style = list(
+        cell_text(weight = "bold")  ),
+      locations = cells_column_labels(columns = c(varname_f,all))
+    ) %>% 
+    gt::tab_header(
+      title = md(paste0("**Supplementary Table ",stable_index,".** Estimated mean usual intakes of foods and nutrients in adults from the UK Biobank"))) %>%
+    gt::tab_footnote(
+      footnote = "Values are mean (SD). All data except predicted 24-h sodium were modeled using the National Cancer Institute's multivariate method (see Methods) to estimate usual intakes.",
+      location = cells_title("title")) %>% 
+     gt::tab_footnote(
+      footnote =  "Free sugars were estimated as the difference between total sugars intake and the calculated natural sugars contribution from vegetables, fruits, dairy foods and legumes.",
+      locations = cells_body(columns=varname_f,rows= varname_f %in% c("Free sugars, g","Free sugars, %E"))
+     ) %>% 
+      gt::tab_footnote(
+      footnote = "24-h sodium intakes were estimated based on (spot) sodium in urine assay. Sex-specific INTERSALT equations (Western Europe) were used to predict 24-h sodium (Brown et al. American Journal of Epidemiology 2013).",
+      locations = cells_body(columns=varname_f,rows= varname_f =="Predicted 24-h sodium, mg")
+      ) %>% 
+   gtstyle(.)
+
+
+# *********************************************************************** #
+#  Use <gtsave_select> function to print table directly or save as png    #
+# *********************************************************************** #
+  
+gtsave_select(stable_rawdiet,paste0("SupplTable ",stable_index,". intake"),OUTPUT_WORD)  
+  
+stable_index <- stable_index+1
+
+
+```
+
+\newpage
+
+```{r tab-mean-heficomp}
+
+# note: see chunk above for initial import and format of <mcmc_distrib_q_w>
+
+# *********************************************************************** #
+#             Wide data (component score), all participants               #
+# *********************************************************************** #
+  mcmc_distrib_sub_w <- 
+    haven::read_sas(file.path(nci_mcmc_distrib_dir,"distribsub_w0.sas7bdat")) %>%
+    dplyr::select(varname,Mean,StdDev) %>% 
+    dplyr::mutate(
+      all=makeEstimate(Mean,StdDev,0.1)
+    ) %>% 
+    select(-c(Mean,StdDev))
+    
+# *********************************************************************** #
+#               Wide data (total score), all participants                 #
+# *********************************************************************** #
+
+mcmc_distrib_tot_w <-
+    haven::read_sas(file.path(nci_mcmc_distrib_dir,"distribtotal_w0.sas7bdat")) %>%
+    dplyr::select(Mean,StdDev) %>% 
+    dplyr::mutate(
+      varname="HEFI2019_TOTAL_SCORE",
+      type="Total",
+      all=makeEstimate(Mean,StdDev,0.1),
+      #catscore1=NA,
+      #catscore2=NA,
+      #catscore3=NA,
+      #catscore4=NA,
+      complabel="Total score",
+      maxscore=80
+    ) %>% 
+    select(-c(Mean,StdDev))
+  
+  mcmc_distrib_q_tot_w <- mcmc_distrib_tot_w
+
+# *********************************************************************** #
+#           Prepare data for table with component+total scores            #
+# *********************************************************************** #
+    
+  mcmc_distrib_q_comp_w <- 
+    mcmc_distrib_q_w %>% 
+    dplyr::filter(type %in% c("Component","Total")) %>% 
+    dplyr::mutate(
+      # add maximum score for components
+       maxscore = case_when(
+        varname == 'HEFI2019C1_VF' ~ 20,
+        varname == 'HEFI2019C2_WHOLEGR' ~ 5,
+        varname == 'HEFI2019C3_GRRATIO' ~ 5,
+        varname == 'HEFI2019C4_PROFOODS' ~ 5,
+        varname == 'HEFI2019C5_PLANTPRO' ~ 5,
+        varname == 'HEFI2019C6_BEVERAGES' ~ 10,
+        varname == 'HEFI2019C7_FATTYACID' ~ 5,
+        varname == 'HEFI2019C8_SFAT' ~ 5,
+        varname == 'HEFI2019C9_SUGARS' ~ 10,
+        varname == 'HEFI2019C10_SODIUM' ~ 10,
+        varname == 'HEFI2019_TOTAL_SCORE' ~ 80 )
+    ) %>% 
+  # Add a column for mean score of all biobank participants
+  dplyr::full_join(.,mcmc_distrib_sub_w)
+  
+  # Add labels
+  mcmc_distrib_q_comp_w$complabel <- c(complabelstidy, "Total score")
+  
+  # Add total score
+  mcmc_distrib_q_comp_w[mcmc_distrib_q_comp_w$type=="Total",]$all <- mcmc_distrib_q_tot_w$all
+  # Rename as final data
+  mcmc_distrib_q_hefi <- mcmc_distrib_q_comp_w
+  
+# *********************************************************************** #
+#                        Generate table with gt()                         #
+# *********************************************************************** #
+  
+stable_score <- 
+  mcmc_distrib_q_hefi %>% 
+  dplyr::mutate(
+    complabel2= paste0(complabel," (/",maxscore,")")
+  ) %>% 
+  dplyr::select(-c(varname,type,complabel,maxscore)) %>% 
+  gt::gt(.) %>% 
+  gt::cols_move_to_start(c(complabel2,all)) %>% 
+  gt::tab_spanner(
+    columns = c(catscore1,catscore2,catscore3,catscore4),
+    label = md("**Quarter of HEFI-2019 total score**")
+  ) %>% 
+  gt::cols_label(
+    complabel2 = md("**HEFI-2019 components**"),
+    all = paste0("All,\n n=",flowchart_data[nrow(flowchart_data),]$included),
+    catscore1 = mcmc_q_val[1,2],
+    catscore2 = mcmc_q_val[2,2],
+    catscore3 = mcmc_q_val[3,2],
+    catscore4 = mcmc_q_val[4,2]
+  ) %>%
+  gt::tab_style(
+      style = list(
+      cell_text(weight = "bold")  ),
+      locations = cells_column_labels(columns = c(complabel2,all))
+    ) %>% 
+    gt::tab_header(
+      title = md(paste0("**Supplementary Table ",stable_index,".** Estimated means of Healthy Eating Food Index (HEFI)-2019 component and total scores in adults from the UK Biobank"))) %>%
+    gt::tab_footnote(
+      footnote = "Values are mean (SD) scores. The HEFI-2019 was calculated based on usual dietary intakes collected using 24-h dietary recalls (except sodium) and modeled using the National Cancer Institute's multivariate method (see Methods).",
+      location = cells_title("title")) %>% 
+      gt::tab_footnote(
+      footnote = "24-h sodium intakes were estimated based on (spot) sodium in urine assay. Sex-specific INTERSALT equations (Western Europe) were used to predict 24-h sodium (Brown et al. American Journal of Epidemiology 2013).",
+      locations = cells_body(columns=complabel2,rows= complabel2 =="Sodium (/10)")
+      ) %>% 
+     gt::tab_footnote(
+      footnote =  "Free sugars were estimated as the difference between total sugars intake and the calculated natural sugars contribution from vegetables, fruits, dairy foods and legumes.",
+      locations = cells_body(columns=complabel2,rows= complabel2 =="Free sugars (/10)")
+     ) %>%  
+   gtstyle(.)
+    
+  
+# *********************************************************************** #
+#  Use <gtsave_select> function to print table directly or save as png    #
+# *********************************************************************** #
+  
+gtsave_select(stable_score,paste0("SupplTable ",stable_index,". score"),OUTPUT_WORD)  
+  
+stable_index <- stable_index+1
+
+```
+
+\newpage
+
+```{r tab-hefi-distrib}
+
+# *********************************************************************** #
+#                      Prepare Supplementary Table                        #
+# *********************************************************************** #
+
+  # include number of censored indiviudals
+  cens_freq <- 
+    haven::read_sas(file.path(results_dir,"table1_censoring.sas7bdat")) %>% 
+    dplyr::mutate(
+      Category = stringr::str_trim(Category, side = "both"),
+      Stat = stringr::str_trim(Stat, side = "both"),
+      Stat =gsub(')','%)',Stat),
+      Frequency_fmt = scales::comma(Frequency),
+      n_p = paste0("n=",scales::number(Frequency,big.mark=','),'; ',round(Percent,1),"%")) %>% 
+    dplyr::filter(Category=="cens_primary")
+  
+  
+  # wide component score
+  mcmc_distrib_sub_w <- 
+    haven::read_sas(file.path(nci_mcmc_distrib_dir,"distribsub_w0.sas7bdat"))
+  
+  ## add labels
+    mcmc_distrib_sub_w$label <- complabelstidy
+    
+  # wide total score
+  mcmc_distrib_tot_w <-
+    haven::read_sas(file.path(nci_mcmc_distrib_dir,"distribtotal_w0.sas7bdat")) %>% 
+    # reorder as last
+    dplyr::mutate(c=11,
+                  varname="HEFI2019_TOTAL_SCORE",
+                  label="Total score")
+
+# Append component and total score, make label and keep relevant pctile
+  ## Indicate percentile to keep 
+  distrib_perc <- c("Pctile1","Pctile5","Pctile10","Pctile25","Pctile50","Pctile75","Pctile90","Pctile95","Pctile99")
+  
+  ## append total and subscores
+  distrib_sub_and_total <-
+    dplyr::bind_rows(mcmc_distrib_sub_w,mcmc_distrib_tot_w) %>%
+    dplyr::arrange(c) %>% 
+    dplyr::mutate(
+      label2 = ifelse(c==11,
+                      # total score (id=11) has a max. of 80 pts
+                      paste0(label," (/80)"),
+                      # use `Max` col as hack to get total score
+                      paste0(label," (/",scales::number(Max,accuracy=1),")")
+                      )
+    ) %>% 
+    dplyr::select(starts_with("label"),Mean,all_of(!!distrib_perc))
+  
+# *********************************************************************** #
+#                        Generate table with gt()                         #
+# *********************************************************************** #
+  
+  stable_distrib_score <-
+    distrib_sub_and_total %>% 
+    gt::gt() %>%
+    gt::cols_hide(c(Mean,label)) %>% 
+    gt::fmt_number(columns = all_of(distrib_perc), decimals = 1) %>%
+    gt::cols_align(align="center",columns=c(all_of(distrib_perc))) %>%
+    gt::tab_spanner(
+      label = md("**Percentiles**"),
+      columns = all_of(distrib_perc)) %>%
+    gt::cols_label(
+      label2 =md("**Components**"),
+      Pctile1=1,
+      Pctile5=5,
+      Pctile10=10,
+      Pctile25=25,
+      Pctile50=50,
+      Pctile75=75,
+      Pctile90=90,
+      Pctile95=95,
+      Pctile99=99) %>%
+    gt::tab_header(
+      title = md(paste0("**Supplementary Table ",stable_index,".** Estimated percentiles of Healthy Eating Food Index (HEFI)-2019 component and total scores in adults from the UK Biobank"))
+      ) %>%
+    gt::tab_footnote(
+      footnote = paste0("Values are percentile of the distribution. Percentile values in this table may differ slightly from percentile values of the outcome model, since values of the latter excludes censored participants (",cens_freq[cens_freq$Level==1,]$n_p,") while the former includes them. The HEFI-2019 was calculated based on usual dietary intakes modeled using the National Cancer Institute's multivariate method (see Methods)."),
+      location = cells_title("title")) %>%
+    gt::tab_footnote(
+      footnote = "24-h sodium intakes were estimated based on (spot) sodium in urine assay. Sex-specific INTERSALT equations (Western Europe) were used to predict 24-h sodium (Brown et al. American Journal of Epidemiology 2013).",
+      locations = cells_body(columns=label2,rows= label2 =="Sodium (/10)")
+      ) %>% 
+     gt::tab_footnote(
+      footnote =  "Free sugars were estimated as the difference between total sugars intake and the calculated natural sugars contribution from vegetables, fruits, dairy foods and legumes.",
+      locations = cells_body(columns=label2,rows= label2 =="Free sugars (/10)")
+     ) %>% 
+    gtstyle(.)
+  
+# *********************************************************************** #
+#  Use <gtsave_select> function to print table directly or save as png    #
+# *********************************************************************** #
+  
+gtsave_select(stable_distrib_score,paste0("SupplTable ",stable_index,". score distrib"),OUTPUT_WORD)  
+  
+stable_index <- stable_index+1
+  
+    
+```
+
+\newpage
+
+```{r tab-hefi-correlation }
+
+# *********************************************************************** #
+#           Correlation between HEFI component and total score            #
+# *********************************************************************** #
+
+
+# ********************************************** #
+#                 1) Import data                 #
+# ********************************************** #
+
+  stable_corr_data <- 
+    haven::read_sas(file.path(nci_mcmc_corr_dir,"task7_correlations.sas7bdat")) %>% 
+    dplyr::select(-c(Label,Varname)) %>% 
+    dplyr::filter(Variable!="energy")
+  
+  ## export comp name list
+  complist <- names( select(stable_corr_data,!c(HEFI2019_TOTAL_SCORE,Variable))
+                     )
+  ## add comp label
+  stable_corr_data$varnames <- c(complabelstidy,"Residual HEFI-2019")#,"Usual energy intake")
+
+# ********************************************** #
+#          2) Generate table with gt()           #
+# ********************************************** #
+  
+stable_corr <-
+    stable_corr_data %>% 
+    gt::gt(.) %>%
+    gt::cols_move_to_start(columns=c(varnames)) %>%
+    gt::cols_hide(columns=c(Variable,HEFI2019_TOTAL_SCORE)) %>% # hide the total column (not needed if no energy row)
+    gt::fmt_number(columns = all_of(complist), decimals = 2) %>%
+    gt::cols_align(columns = all_of(complist),"center") %>%
+    gt::sub_missing(
+      columns = all_of(complist),
+      missing_text = "-"
+    ) %>%
+    gt::cols_label(
+      varnames = "Component",
+      VF = "Vegetables and fruits",
+      WHOLEGR = "Whole-grain foods",
+      GRRATIO = "Grain foods ratio",
+      PROFOODS = "Protein foods",
+      PLANTPRO = "Plant-based protein foods	",
+      BEVERAGES = "Beverages",
+      FATTYACID = "Fatty acids ratio",
+      SFAT = "Saturated fats",
+      SUGARS = "Free sugars",
+      SODIUM = "Sodium"#,ADHTOOL1_TOTAL_SCORE = "Residual HEFI-2019	"
+    ) %>%
+    gt::tab_style(
+      style = list(
+        cell_text(weight = "bold")  ),
+      locations = cells_column_labels(columns = c(varnames,!!complist))
+    ) %>%
+    gt::tab_header(
+      title = md(paste0("**Supplementary Table ",stable_index,".** Estimated Pearson correlation coefficients of HEFI-2019 component and total scores in adults from the UK Biobank"))) %>%
+    gt::tab_footnote(
+      footnote = "The HEFI-2019 was calculated based on dietary intakes modeled using the National Cancer Institute's multivariate method (see Methods). HEFI-2019, Healthy Eating Food Index 2019.",
+      location = cells_title("title")) %>% 
+      gt::tab_footnote(
+      footnote = "24-h sodium intakes were estimated based on (spot) sodium in urine assay. Sex-specific INTERSALT equations (Western Europe) were used to predict 24-h sodium (Brown et al. American Journal of Epidemiology 2013).",
+      locations = cells_body(columns=varnames,rows= varnames =="Sodium")
+      ) %>% 
+     gt::tab_footnote(
+      footnote =  "Free sugars were estimated as the difference between total sugars intake and the calculated natural sugars contribution from vegetables, fruits, dairy foods and legumes.",
+      locations = cells_body(columns=varnames,rows= varnames =="Free sugars")
+     ) %>%  
+    gt::tab_footnote (
+      footnote ="For the correlation between a given component score and the (residual) HEFI-2019, the HEFI-2019 corresponded to the total HEFI-2019 from which points from the component being assessed were subtracted.",
+      location = cells_body(
+        columns = c(varnames),
+        rows = varnames =="Residual HEFI-2019" )
+    ) %>% 
+   gtstyle(.)
+
+
+# *********************************************************************** #
+#  Use <gtsave_select> function to print table directly or save as png    #
+# *********************************************************************** #
+  
+gtsave_select(stable_corr,paste0("SupplTable ",stable_index,". corr"),OUTPUT_WORD)  
+
+stable_index <- stable_index+1
+  
+```
+
+\newpage
+
+```{r tab-plausible2}
+
+# *********************************************************************** #
+#                       Plausibility of reported E                        #
+# *********************************************************************** #
+
+# Import overall data
+plausibility_E <- 
+  haven::read_sas(file.path(results_dir,"table1_reporting.sas7bdat"))
+
+# Format selected groups (all, sex, age)
+plausibility_E_select <- 
+  plausibility_E %>% 
+  dplyr::mutate(Level = ifelse(id==0,"All",Level)) %>% 
+  dplyr::filter(id<=7 | id==19) %>%# id 0 = overall sample, up to 25 =  all, sex
+  dplyr::select(Level,Stat,F_Reporter_num,id) %>% 
+  # Format the percent column
+ dplyr::mutate(
+   Characteristics = case_when (
+     id == 0 ~ "All",
+     id == 1 ~ "Sex",
+     id == 7 ~ "Age",
+     id == 19 ~ "Body mass index, kg/m\u00B2"
+   ),
+   Stat =  gsub(')','%)',Stat)
+ ) %>% 
+ # transpose
+  tidyr::pivot_wider(.,values_from=Stat,names_from = F_Reporter_num)
+
+# Actual table
+stable_plausible2 <- 
+  plausibility_E_select %>% 
+  dplyr::group_by(Characteristics) %>% 
+  gt::gt() %>% 
+  gt::cols_hide(id) %>% 
+  gt::cols_label(
+    Level = "Subgroups"
+  ) %>% 
+  gt::tab_style( 
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels()
+  ) %>% 
+  gt::tab_style(
+        style = cell_text(align = "left", indent = px(20)),
+        locations = cells_body(columns=c(1:2))
+      ) %>% 
+   gt::tab_header(
+    title = md(paste0("**Supplementary Table ",stable_index,".** Plausibility of self-reported energy intakes in ",flowchart_data[nrow(flowchart_data),]$included," adults from the UK Biobank, by age, sex and body mass index "))) %>% 
+  gt::tab_footnote(
+    footnote = paste0("Values are n (%). The percentages add up to 100% among columns. The plausibility of reported energy intakes was estimated using the method by Huang et al. Plausible reporting corresponded to a ratio of reported energy intake to predicted energy requirements within ",round(1-plausibleCV[1,"SD1"],2)," and ",round(1+plausibleCV[1,"SD1"],2),". See Supplementary Methods for details."),
+    location = cells_title("title")) %>%
+   gtstyle(.)
+
+# *********************************************************************** #
+#  Use <gtsave_select> function to print table directly or save as png    #
+# *********************************************************************** #
+  
+gtsave_select(stable_plausible2,paste0("SupplTable ",stable_index,". plausible2"),OUTPUT_WORD)  
+
+stable_index <- stable_index+1
+
+
+
+
+```
+
+
+## Relationship between the HEFI-2019 and hazards of CVD
+
+```{r hr-timet}
+
+# *********************************************************************** #
+#        Estimates of different HR at varying length of follow-up         #
+# *********************************************************************** #
+
+# ********************************************** #
+#           1) Import and prepare data           #
+# ********************************************** #
+
+  ### Of note, assuming that exposure data includes information about all custom contrasts
+
+## import hr at time t
+  hr_timet <- haven::read_sas(file.path(nci_mcmc_model_dir,"estimatesf_timet.sas7bdat"))
+  
+## import hr at time of follow up
+ hr_timef <- 
+    haven::read_sas(file.path(nci_mcmc_model_dir,"estimatesf.sas7bdat")) %>% 
+    dplyr::right_join(.,exposure) %>% # keep only exposure defined in exposure data
+  dplyr::mutate(
+    StmtNo_Label = paste0(p,"th percentile, ",HEFI2019_TOTAL_SCORE, " pts")
+    ) 
+   ### reset StmtNo
+   hr_timef$StmtNo <- seq.int(nrow(hr_timef))
+
+# input estimates for full follow-up
+hr_time137 <- 
+  hr_timef %>% 
+  dplyr::select(p,HEFI2019_TOTAL_SCORE,estimate_ci) %>% 
+  dplyr::rename(t137=estimate_ci)
+
+# ********************************************** #
+#          2) Generate table with gt()           #
+# ********************************************** #
+
+stable_hrtimet <-
+  # transpose long->wide, and output table
+  hr_timet %>% 
+  dplyr::arrange(desc(HEFI2019_TOTAL_SCORE)) %>% 
+  dplyr::select(HEFI2019_TOTAL_SCORE,time_t,estimate_ci) %>% 
+  tidyr::pivot_wider(.,names_prefix="t",names_from = time_t,values_from = estimate_ci) %>%
+  dplyr::full_join(.,hr_time137) %>% 
+  dplyr::mutate(
+    # reset reference level to 1.00
+    t12 = ifelse(HEFI2019_TOTAL_SCORE==46.6, "1 (reference)",t12),
+    t36 = ifelse(HEFI2019_TOTAL_SCORE==46.6, "1 (reference)",t36),
+    t60 = ifelse(HEFI2019_TOTAL_SCORE==46.6, "1 (reference)",t60),
+    t84 = ifelse(HEFI2019_TOTAL_SCORE==46.6, "1 (reference)",t84),
+    t137 = ifelse(HEFI2019_TOTAL_SCORE==46.6, "1 (reference)",t137) 
+    ) %>% 
+  dplyr::filter(is.na(t137)==FALSE) %>% 
+  # actual table 
+  gt::gt(.) %>% 
+  gt::cols_move_to_start(p) %>% 
+  gt::cols_label(
+    p = "Percentile",
+    HEFI2019_TOTAL_SCORE = "Points (/80)",
+    t12 = "1 year",
+    t36 = "3 years",
+    t60 = "5 years",
+    t84 = "7 years",
+    t137 = "11 years (full)"
+  ) %>%
+  gt::tab_spanner(
+  label = md("**Total HEFI-2019 score**"),
+  columns = c( p, HEFI2019_TOTAL_SCORE)) %>% 
+ gt::tab_spanner(
+  label = md("**Varying length of follow-up**"),
+  columns = c( t12, t36, t60, t84)) %>%
+  gt::tab_header(
+    title = md(paste0("**Supplementary Table ",stable_index,".** Hazard ratios for CVD according to varying length of follow-up in adults from the UK Biobank"))) %>%
+  gt::tab_footnote(
+    footnote = "Values are hazard ratios (95%CI) for CVD at specific percentiles of the total HEFI-2019 score distribution, based on usual intakes. The hazard ratios are based on a fully adjusted Cox regression model using inverse probability weighting for exposure and death-censoring. The reference HEFI-2019 score (median) corresponds approximately to the HEFI-2019 participants had on average, i.e., under no hypothetical dietary change. The 95%CI were estimated using 200 bootstrap samples. HEFI-2019, Healthy Eating Food Index 2019.", location = cells_title("title"))  %>% 
+   gtstyle(.)
+
+# *********************************************************************** #
+#  Use <gtsave_select> function to print table directly or save as png    #
+# *********************************************************************** #
+  
+gtsave_select(stable_hrtimet,paste0("SupplTable ",stable_index,". hrtimet"),OUTPUT_WORD)  
+
+stable_index <- stable_index+1
+
+
+```
+
+\newpage
+
+## Survival curves and risk based on a fully parametric modelling of time
+
+```{r sensitivitydata}
+
+# ********************************************** #
+#            Import interaction parm             #
+# ********************************************** #
+
+coxparmf <-
+  haven::read_sas(file.path(nci_mcmc_model_dir,"coxparmf.sas7bdat"))
+
+
+```
+
+An interaction test between the (log) time to CVD and the total HEFI-2019 score coefficient did not contradict the assumption of proportional hazards in the Cox regression model (p-interaction=`r round(coxparmf[coxparmf$name=="hefi_x_time",]$pvalue,digits=2)`). However, such statistical test may be underpowered [@Stensrud2020]. Thus, the survival curves from a model using a fully parametric approach to model the time to CVD variable are presented below (**Supplementary Figure** \@ref(fig:surv-all-plot-LR)). The corresponding risk estimates are presented in **Supplementary Table `r stable_index`**.
+
+```{r surv-all-plot-LR, fig.height=6, fig.width=7.5, fig.cap="Probability of remaining CVD-free (survival curves) at varying HEFI-2019 score percentiles in adults from the UK Biobank. The probability of remaining CVD-free at the median HEFI-2019 score (yellow) is the mean probability and hence is the reference survival curve in a hypothetical scenario where there is no change in the HEFI-2019 in this population. Other survival curves reflect the probability of remaining CVD-free under hypothetical scenarios where all participants would achieve a HEFI-2019 score corresponding to predetermined percentiles in this population. Estimates of survival probability are based on fully adjusted pooled logistic regression models using inverse probability weighting for dietary exposure and death-censoring. In the pooled logistic regression model, the time to CVD was modelled using a restricted cubic spline with 5 knots and an interaction term between the total HEFI-2019 score and time to CVD was included. Total energy intake was also included in the pooled logistic regression model. The total HEFI-2019 score is based on usual dietary intakes modeled using the National Cancer Institute's multivariate algorithm (see Methods). CVD, cardiovascular disease, HEFI-2019, Healthy Eating Food Index-2019."}
+
+# *********************************************************************** #
+#   Import and format data for survival curve and estimates, pooled LR    #
+# *********************************************************************** #
+
+# Define 50th percentile as the reference level
+t0 <- 50  
+
+# 0) import reference level for survival curves
+survival_ref <- 
+  haven::read_sas(file.path(nci_mcmc_model_dir,"inexposure.sas7bdat")) %>% 
+  dplyr::filter(p==t0) %>% 
+  dplyr::pull(hefi_RCS_lin)
+    
+# 1) import all survival curves, but based on pooled LR
+  ## define curve labels  
+  survivalcurve_all_LR <- 
+    haven::read_sas(file.path(nci_mcmc_model_dir,"survivalplot_t_lr.sas7bdat")) %>% 
+    dplyr::filter(replicate==0) %>% 
+    dplyr::mutate(
+    ## add to survival curve data to calculate differences
+      ref = survival_ref,
+    ## new labels indicating usual diet
+      HEFI2019_exposure=ifelse(p==t0,
+                               "Median",
+                               paste0("Percentile ",p)),
+    ## make another label indicating the degree of change vs. "no dietary change"
+      sign = ifelse(HEFI2019_TOTAL_SCORE<ref,'','+'),
+      HEFI2019_exposure_full2 = ifelse(p==t0, 
+                                      paste0("Median (", ref," pts)"),
+                                      paste0("Percentile ",p," (",sign,HEFI2019_TOTAL_SCORE-ref," pts)"))
+  ) %>% 
+  dplyr::select(-sign)
+
+# *********************************************************************** #
+#      Output survival curve using the <survivalcurveplot> function       #
+# *********************************************************************** #
+  
+# note: the function survivalcuveplot is located in set-up chunk
+  
+# plot survival curves at every hefi2019 level, by sex
+  
+survivalcurve_plot_LR <-
+  survivalcurve_all_LR %>% 
+  dplyr::rename(estimate=Survival) %>% # renamed for consistency
+  survivalcurveplot(indata  = .)
+
+# ********************************************** #
+#                  Print curves                  #
+# ********************************************** #
+
+survivalcurve_plot_LR
+
+# ********************************************** #
+#                  Save figure                   #
+# ********************************************** #
+
+  ggplot2::ggsave(file.path(suppl_dir,"Fig_survival_lr.pdf"),
+        plot=survivalcurve_plot_LR, dpi=300, width=7.5,height=6, units="in",scale=1,device = cairo_pdf)
+
+  ggplot2::ggsave(file.path(suppl_dir,"Fig_survival_lr.png"),
+         plot=survivalcurve_plot_LR, dpi=300, width=7.5,height=6, units="in",scale=1)
+
+
+```
+
+```{r sur-all-data-lr}
+
+# *********************************************************************** #
+#      Prepare data for outcome difference/ratio at given percentile      #
+# *********************************************************************** #
+
+# define percentile of t0
+  ref_perc <- 50
+
+# *********************************************************************** #
+#     Prepare data for survival difference/ratio at given percentile      #
+# *********************************************************************** #  
+
+surv_contrasts_p50lr <- 
+  haven::read_sas(file.path(nci_mcmc_model_dir,"survivalcontrast_lrf.sas7bdat")) %>%
+  dplyr::filter(type!="P(outcome)") %>% 
+  # keep only contrasts, at full time to follow-up
+  dplyr::filter(time_to_primary==max(time_to_primary)) %>% 
+  # keep only contrasts with `t0` as reference, i.e., p50
+  dplyr::slice(grep(paste0("_p",ref_perc),name)) %>% 
+  dplyr::select(-c(p,type)) %>% 
+  # split t0 and t1 for easier call
+  tidyr::separate(name,into=c("type","t1","t0"),sep='_') %>% 
+  # change to num
+  dplyr::mutate(
+    t0=as.numeric(gsub('p','',t0)),
+    t1=as.numeric(gsub('p','',t1)),
+    ## reverse comparison for contrasts below p50
+    across(c(estimate,lcl95,ucl95),
+       ~ ifelse(t0<ref_perc,
+                ifelse(type=="RD",-.x,1/.x)
+                ,.x)
+      ),
+    t1b=ifelse(t0<ref_perc,t0,t1),
+    t0b=ifelse(t0<ref_perc,t1,t0)
+  ) %>% 
+  dplyr::select(-c(t0,t1,estimate_ci,estimate_se,`_ci`,`_se`,alpha,one_minus_half_alpha)) %>% 
+  dplyr::rename(t0=t0b,t1=t1b)
+
+# combine labels of survival curves with outcome diff. and ratio
+  hefi2019_exposure <- 
+    haven::read_sas(file.path(nci_mcmc_model_dir,"survivalplotsexf.sas7bdat")) %>% 
+    dplyr::select(p,starts_with("HEFI2019")) %>% 
+    dplyr::distinct(HEFI2019_TOTAL_SCORE,.keep_all = TRUE) %>% 
+    dplyr::rename(t1=p)
+
+surv_contrasts_p50lr <- 
+  surv_contrasts_p50lr %>% 
+  dplyr::left_join(.,hefi2019_exposure) %>% 
+  dplyr::mutate(
+    ref = hefi2019_exposure[hefi2019_exposure$t1==ref_perc,]$HEFI2019_TOTAL_SCORE,
+    t1t0_diff=HEFI2019_TOTAL_SCORE-ref
+    ) %>% 
+  dplyr::select(-c(tvalue,cv))
+
+# Outcome risk ratio and difference separately for easier extraction in text
+surv_RD50_lr <-
+  surv_contrasts_p50lr %>% 
+  dplyr::filter(type=="RD")
+
+surv_RR50_lr <-
+  surv_contrasts_p50lr %>% 
+  dplyr::filter(type=="RR")
+
+
+# *********************************************************************** #
+#        Combine survival estimate with survival difference/ratio         #
+# *********************************************************************** #
+
+#  Output p(outcome), labels
+pOutcome_data_lr <- 
+  haven::read_sas(file.path(nci_mcmc_model_dir,"survivalplot_lrf.sas7bdat")) %>%
+  dplyr::filter(time_to_primary==max(time_to_primary)) %>% 
+  dplyr::select(strata,p,HEFI2019_TOTAL_SCORE,estimate,lcl95,ucl95) %>% 
+  dplyr::mutate(
+    ## add reference score
+    ## `count the dead` instead of living
+    across(c(estimate,lcl95,ucl95),
+           ~ (1-.x)*100),
+    p_ci = paste0(scales::number(estimate,0.001), " (",make95ci(.,rounding=0.001),")"),
+    ref = hefi2019_exposure[hefi2019_exposure$t1==ref_perc,]$HEFI2019_TOTAL_SCORE
+  )
+
+# merge p(outcome) data with contrasts
+tempdata <-
+  surv_contrasts_p50lr %>% 
+  dplyr::select(t1,estimate,lcl95,ucl95,type) %>% 
+  tidyr::pivot_wider(.,values_from = c(estimate,lcl95,ucl95),names_from = type) %>% 
+  dplyr::rename(p=t1)
+
+pOutcome_n_contrast_data_lr <- 
+  pOutcome_data_lr %>% 
+  dplyr::select(-c(lcl95,ucl95)) %>% 
+  dplyr::rename(risk=estimate,survival_ref=ref) %>% 
+  dplyr::full_join(.,tempdata) %>% 
+  dplyr::mutate(
+    # create `intervention label`
+    intervention = case_when(
+      HEFI2019_TOTAL_SCORE < survival_ref ~ paste("-",abs(HEFI2019_TOTAL_SCORE-survival_ref),"pts"),
+      HEFI2019_TOTAL_SCORE > survival_ref ~ paste("+",abs(HEFI2019_TOTAL_SCORE-survival_ref),"pts"),
+      HEFI2019_TOTAL_SCORE == survival_ref ~ "0 pts (reference)"
+    ),
+    # make combined estimate for RR and RD, reverse 95ci ordering for increased risks
+    RR_ci = case_when(
+       HEFI2019_TOTAL_SCORE < survival_ref ~ paste0(scales::number(estimate_RR,0.01),
+                                                   " (",
+                                                   scales::number(ucl95_RR,0.01),
+                                                   ", ",
+                                                   scales::number(lcl95_RR,0.01),
+                                                    ")"),
+       HEFI2019_TOTAL_SCORE > survival_ref ~ paste0(scales::number(estimate_RR,0.01),
+                                                   " (",
+                                                   scales::number(lcl95_RR,0.01),
+                                                   ", ",
+                                                   scales::number(ucl95_RR,0.01),
+                                                    ")"),       
+    ),
+    RD_ci = case_when(
+       HEFI2019_TOTAL_SCORE < survival_ref ~ paste0(scales::number(estimate_RD,0.01),
+                                                   " (",
+                                                   scales::number(ucl95_RD,0.01),
+                                                   ", ",
+                                                   scales::number(lcl95_RD,0.01),
+                                                    ")"),
+       HEFI2019_TOTAL_SCORE > survival_ref ~ paste0(scales::number(estimate_RD,0.01),
+                                                   " (",
+                                                   scales::number(lcl95_RD,0.01),
+                                                   ", ",
+                                                   scales::number(ucl95_RD,0.01),
+                                                    ")"),       
+    )
+  ) %>% 
+  # show increase first
+  dplyr::arrange(strata,desc(p))
+
+rm(tempdata)
+
+
+```
+
+```{r surv-lr-table}
+
+
+# *********************************************************************** #
+#       Output survival estimate/difference/ratio table, pooled LR        #
+# *********************************************************************** #
+
+pOutcome_n_contrast_tab_lr <-
+  pOutcome_n_contrast_data_lr %>% 
+dplyr::mutate(# rescale percentage
+                  risk=risk/100 ) %>% 
+  dplyr::select(-c(starts_with("estimate"),starts_with("lcl"),starts_with("ucl"))) %>% 
+  gt::gt(.) %>% 
+    gt::cols_hide(c(survival_ref,strata,p_ci)) %>% 
+    gt::cols_move_to_start(c(p,HEFI2019_TOTAL_SCORE,intervention)) %>% 
+    gt::tab_spanner(
+      label = md("**Total HEFI-2019**"),
+      columns =c (p,HEFI2019_TOTAL_SCORE,intervention)
+    ) %>% 
+    gt::tab_spanner(
+      label = md("**Difference in risk estimates (95%CI)**"),
+      columns =c (RD_ci, RR_ci)
+      #columns =c (p_ci,RR_ci, RD_ci)
+    ) %>% 
+   gt::cols_label(
+     p="Percentile",
+     intervention = "Hypothetical change",
+     HEFI2019_TOTAL_SCORE = "Score (/80)",
+     #p_ci = paste0(round(max(survivalcurve_all$time_to_primary)/12),"-y risk (95%CI), %"),
+     risk = md(paste0("**",round(max(surv_contrasts_p50lr$time_to_primary)/12),"-year risk**")),
+     RR_ci = "Relative",
+     RD_ci = "Absolute, % point"
+   ) %>%
+  gt::fmt_percent(
+    columns=risk,
+    decimals=1
+  ) %>% 
+  gt::sub_missing(
+    columns=c(RR_ci),
+    missing_text="1 (reference)"
+  ) %>%
+  gt::sub_missing(
+    columns=c(RD_ci),
+    missing_text="0 (reference)"
+  ) %>% 
+  gt::tab_header(
+    title = md(paste0("**Supplementary Table ",stable_index,".** Estimated risks of CVD in hypothetical scenarios where all eligible participants in the UK Biobank achieve predetermined percentiles of the total HEFI-2019 score at baseline"))) %>% 
+    gt::tab_footnote(
+    footnote = paste(" Difference in risk estimates reflect risks, had all participants in the sample achieved a prespecified HEFI-2019 score percentile, compared with the risk at the median HEFI-2019 score among all participants, the reference scenario where there is no change in HEFI-2019 (i.e., `0 pts`). Estimates are based on fully-adjusted pooled logistic regression models using inverse probability weighting (IPW) for dietary exposure and death-censoring. The IPW model covariates were",knitr::combine_words(tolower(covar_list)[1:length(covar_list)-1]),". In the pooled logistic regression model, the time to CVD was modelled using a restricted cubic spline with 5 knots and an interaction term between the total HEFI-2019 score and time to CVD was included. Total energy intake was also included as a covariate in the pooled logistic regression model. The 95%CI were estimated using 200 bootstrap samples. HEFI-2019, Healthy Eating Food Index-2019; IPW, inverse probability weighting; NCI, National Cancer Institute."),
+    locations =  cells_title("title"))  %>% 
+  gt::tab_footnote(
+  footnote = "The HEFI-2019 score is based on usual dietary intakes modelled using the National Cancer Institute multivariate algorithm (see Methods).",
+  locations = cells_column_spanners(spanners="**Total HEFI-2019**") 
+    ) %>% 
+    gtstyle(.)
+
+# *********************************************************************** #
+#  Use <gtsave_select> function to print table directly or save as png    #
+# *********************************************************************** #
+  
+gtsave_select(pOutcome_n_contrast_tab_lr,paste0("SupplTable ",stable_index,". pooledLR"),OUTPUT_WORD)
+
+stable_index <- stable_index+1
+
+
+```
+
+\newpage
+
+## Relationship between the HEFI-2019 and CVD, by sex
+
+```{r ph-cox-bysex}
+
+# ********************************************** #
+#               Interaction tests                #
+# ********************************************** #
+
+coxparm_sex <- 
+    haven::read_sas(file.path(nci_mcmc_model_dir,"coxparm_sexf.sas7bdat")) 
+
+```
+
+
+The interaction test between the (log) time to outcome and sex in a Cox regression model revealed evidence against the assumption that hazards were proportional (`r noquote(scales::pvalue(coxparm_sex[coxparm_sex$name=="sex_x_h0t",]$pvalue,add_p=TRUE))`). To model time-varying hazards, we also used a pooled logistic regression model. The time to CVD was modelled using a restricted cubic spline with 5 knots and an interaction term between the total HEFI-2019 score and time to CVD. Total energy intake was also included in the model. The sex-specific survival curves from the pooled logistic regression model are presented in **Supplementary figure \@ref(fig:survbysexcurve)**.
+
+```{r survbysexcurve, fig.height=8, fig.width=6, fig.cap="Probability of remaining CVD-free (survival curves) at varying HEFI-2019 score percentiles in males (A) and females (B) from the UK Biobank. The probability of remaining CVD-free at the median HEFI-2019 score (yellow) is the mean  probability and hence is the reference survival curve in a hypothetical scenario where there is no change in the HEFI-2019 in this population. Other curves reflect the probability of remaining CVD-free under hypothetical scenarios where all participants would achieve a HEFI-2019 score corresponding to predetermined percentiles in this population. Estimates of survival probability are based on fully adjusted pooled logistic regression models using inverse probability weighting for dietary exposure and death-censoring and stratified by sex. The inverse probability weighting models were also stratified by sex. In the pooled logistic regression model, the time to CVD was modelled using a restricted cubic spline with 5 knots and an interaction term between the total HEFI-2019 score and time to CVD was included. Total energy intake was also included in the pooled logistic regression model. The total HEFI-2019 score is based on usual dietary intakes modeled using the NCI multivariate algorithm (see Methods). HEFI-2019, Healthy Eating Food Index-2019; NCI, National Cancer Institute."}
+
+
+# *********************************************************************** #
+#  Output survival curve using the <survivalcurveplot> function, by sex   #
+# *********************************************************************** #
+
+# 0) define percentile of t0
+  t0 <- 50
+
+# 1) import reference level for survival curves
+survival_ref <- 
+  haven::read_sas(file.path(nci_mcmc_model_dir,"inexposure.sas7bdat")) %>% 
+  dplyr::filter(p==t0) %>% 
+  dplyr::pull(hefi_RCS_lin)
+
+# 2) define curve labels  
+  survivalcurve_bysex <- 
+  haven::read_sas(file.path(nci_mcmc_model_dir,"survivalplotsexf.sas7bdat")) %>% 
+  dplyr::mutate(
+    ## add ref to survival curve data to calculate differences
+      ref = survival_ref ,
+    ## new labels indicating usual diet
+      HEFI2019_exposure=ifelse(p==t0,
+                               "Median",
+                               paste0("Percentile ",p)),
+      HEFI2019_exposure_full=ifelse(p==t0, 
+                                    "Median",
+                                    paste0("Percentile ",p," (",HEFI2019_TOTAL_SCORE," pts)") ) ,
+  ## make another label indicating the degree of change vs. "no dietary change"
+      sign = ifelse(HEFI2019_TOTAL_SCORE<ref,'','+'),
+      HEFI2019_exposure_full2 = ifelse(p==t0, 
+                                      paste0("Median (", ref," pts)"),
+                                      paste0("Percentile ",p," (",sign,HEFI2019_TOTAL_SCORE-ref," pts)"))
+  ) %>% 
+  dplyr::select(-sign) %>% 
+  dplyr::filter(is.na(estimate)==FALSE) # removes max. time of follow-up reflecting the other sex
+  
+# ********************************************** #
+#               Generate curves                  #
+# ********************************************** #
+  
+# Of note the function survivalcuveplot is located in set-up chunk
+  
+# 3.1) plot survival curves at every hefi2019 level, by sex
+  
+survivalcurve_plot_male <-
+  survivalcurve_bysex %>% 
+  dplyr::filter(strata=="males") %>% 
+  survivalcurveplot(indata  = .)
+
+survivalcurve_plot_female <- 
+  survivalcurve_bysex %>%
+  dplyr::filter(strata=="females") %>%  # p90 is identical to p75
+  survivalcurveplot(.,min_y = 0.975) 
+
+# 3.2) combine with patchwork
+
+survivalcurve_plot_bysex <-
+(survivalcurve_plot_male +
+  ggplot2::labs(x=NULL,subtitle = "A. Survival curves in males") ) / 
+survivalcurve_plot_female + 
+  ggplot2::labs(subtitle = "B. Survival curves in females")
+
+
+# ********************************************** #
+#                  Print curves                  #
+# ********************************************** #
+
+survivalcurve_plot_bysex
+
+# ********************************************** #
+#                  Save figure                   #
+# ********************************************** #
+
+  ggplot2::ggsave(file.path(suppl_dir,"Fig_stcurve_sex.pdf"),
+        plot=survivalcurve_plot_bysex, dpi=300, width=6,height=8, units="in",scale=1,device = cairo_pdf)
+
+  ggplot2::ggsave(file.path(suppl_dir,"Fig_stcurve_sex.png"),
+         plot=survivalcurve_plot_bysex, dpi=300, width=6,height=8, units="in",scale=1)
+ 
+ 
+
+
+```
+
+\newpage
+
+##  Potential effect of unmeasured confounding (E-Value)
+
+```{r evalue-analysis}
+
+# *********************************************************************** #
+#                     Bias analysis using the EValue                      #
+# *********************************************************************** #
+
+  #note: contrasts of survival curve are the same as the one generated in main manuscript
+
+# output contrasts of survival curve
+surv_contrasts_p50 <- 
+  haven::read_sas(file.path(nci_mcmc_model_dir,"survivalcontrastf.sas7bdat")) %>% 
+  # keep only contrasts, at full time to follow-up
+  dplyr::filter(type!="P(outcome)",
+                time_to_primary==max(time_to_primary)) %>%
+  # keep only contrasts with p50 as reference
+  dplyr::slice(grep("_p50",name)) %>% 
+  dplyr::select(-c(p,type)) %>% 
+  # split t0 and t1 for easier call
+  tidyr::separate(name,into=c("type","t1","t0"),sep='_') %>% 
+  # change to num
+  dplyr::mutate(
+    t0=as.numeric(gsub('p','',t0)),
+    t1=as.numeric(gsub('p','',t1)),
+    ## reverse comparison for contrasts below p50
+    across(c(estimate,lcl95,ucl95),
+           ~ ifelse(t0<50,
+                    ifelse(type=="RD",-.x,1/.x)
+                    ,.x)
+    ),
+    t1b=ifelse(t0<50,t0,t1),
+    t0b=ifelse(t0<50,t1,t0)
+  ) %>% 
+  dplyr::select(-c(t0,t1,estimate_ci,estimate_se,`_ci`,`_se`)) %>% 
+  dplyr::rename(t0=t0b,t1=t1b)
+
+# Split Relative Risks (RR) and Risk Difference (RD)
+
+surv_RD50 <-
+  surv_contrasts_p50 %>% 
+  dplyr::filter(type=="RD")
+
+surv_RR50 <-
+  surv_contrasts_p50 %>% 
+  dplyr::filter(type=="RR")
+
+# *********************************************************************** #
+#            Calculate E-Value based on estimand of interest              #
+# *********************************************************************** #
+
+# Estimand Pr(Y=1|X=p90,C=0) - Pr(Y=1|X=p50,C=0)
+
+p90_estimate <- surv_RR50 %>% dplyr::filter(t1==90 & t0==50) %>% pull(estimate)
+p90_lcl      <- surv_RR50 %>% dplyr::filter(t1==90 & t0==50) %>% pull(lcl95)
+p90_ucl      <- surv_RR50 %>% dplyr::filter(t1==90 & t0==50) %>% pull(ucl95)
+
+p90_EValues <- 
+  evalues.RR(est = p90_estimate, lo = p90_lcl, hi = p90_ucl)
+
+
+```
+
+While the no unmeasured confounding assumption can never be fully verified with observational data, the E-value can be useful to assess how large the contribution of an unmeasured confounder would have to be to explain the observed results [@RN1431]. For the observed relative risk (RR) at the 90^th^ percentile of the HEFI-2019 score distribution compared with the reference (RR: `r round(surv_RR50[surv_RR50$t1==90,]$estimate,2)`; 95%CI: `r make95ci(surv_RR50[surv_RR50$t1==90,],sep = ", ")`), the E-value was `r round(p90_EValues[2,1],2)` for the point estimate and `r round(p90_EValues[2,3],2)` for the upper bound of the 95%CI. This implies that an unmeasured confounder would have to be associated with both the HEFI-2019 score and incident CVD by a risk ratio of `r round(p90_EValues[2,1],2)`-fold and `r round(p90_EValues[2,3],2)`-fold each to "nullify" the risk estimate and the upper 95% confidence bound, respectively. In other words, residual confounding would have to be relatively important to completely nullify the RR estimate of `r round(surv_RR50[surv_RR50$t1==90,]$estimate,2)`. However, relatively weak confounding could make the upper 95% bound (`r round(surv_RR50[surv_RR50$t1==90,]$ucl95,2)`) cross the null value of 1.00.
+
+\newpage
+
+# Supplementary References
+
+::: {.tocify-extend-page data-unique="tocify-extend-page" style="height: 0;"}
+:::
