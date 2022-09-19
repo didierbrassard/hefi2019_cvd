@@ -102,12 +102,12 @@ estimation](05_HEFI19CVD_Bootstrap_variance.sas)**: parametric bootstrap
 variance estimation using the 250 resampling to obtain confidence
 intervals.
 
-**[10_HEFI19CVD_Article.rmd](10_HEFI19CVD_Article.rmd)**: RMarkdown file
+**[10_HEFI19CVD_Article.rmd](10_HEFI19CVD_Article.Rmd)**: RMarkdown file
 to generate the text, tables and figures of the main manuscript. Tables
 and figures of the manuscript are generated in the `/Manuscript/`
 folder.
 
-**[20_HEFI19CVD_OSM.rmd](20_HEFI19CVD_OSM.rmd)**: RMarkdown file to
+**[20_HEFI19CVD_OSM.rmd](20_HEFI19CVD_OSM.Rmd)**: RMarkdown file to
 generate the text, tables and figures of the online supplementary file.
 Tables and figures of the online supplementary file are generated in the
 `/Manuscript/` folder.
