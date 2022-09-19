@@ -2101,6 +2101,24 @@
 			varname="HEFI2019_TOTAL_SCORE";
 		run;
 
+	/* Transpose wide distribution data to plot histogram */
+		proc transpose data=reslib.distribtotal_w0 out=_long;
+		var pctile: ;
+		run;
+	
+		/* Format and save long data */
+		data reslib.distribtotal_t0;
+		retain pctile p HEFI2019_TOTAL_SCORE ;
+			set _long(rename=(_NAME_=pctile COL1=HEFI2019_TOTAL_SCORE));
+		* add numerical percentile values;
+		p = input(compress(pctile,,'a'),10.);
+		* indicate that all participants were considered;
+		length type class $ 32;
+		class="all";
+		type="PCTILE";
+		label pctile = " ";
+		run;
+
 /* Total HEFI-2019 score - by censoring indicator */
     %percentiles_Survey(data      = baselib.usintake_mc_t0,
                         byvar     = cens_death,
@@ -2114,6 +2132,27 @@
 	/* Format and save output data */
 		data reslib.distribtotal_w_cens_death0 ;
 		retain replicate varname cens_death;
+		set _percentiles;
+		* add variable identifier ;
+			replicate=0;
+			length varname $ 32;
+			varname="HEFI2019_TOTAL_SCORE";
+		run;
+
+
+/* Total HEFI-2019 score - by sex */
+    %percentiles_Survey(data      = baselib.usintake_mc_t0,
+                        byvar     = sex,
+                        var       = HEFI2019_TOTAL_SCORE ,
+                        weight    = weight_nw_sumw_div,
+                        cutpoints = ,
+                        print     = N,
+                        ntitle    = 3
+                        );
+	
+	/* Format and save output data */
+		data reslib.distribtotal_w_sex0 ;
+		retain replicate varname sex;
 		set _percentiles;
 		* add variable identifier ;
 			replicate=0;
@@ -2140,6 +2179,68 @@
 			length varname $ 32;
 			varname="energy";
 		run;
+
+ /*************************************************************************/ 
+ /*       Estimate distribution of HEFI-2019 scores across quarters       */ 
+ /*************************************************************************/ 
+ 
+/* Categorize pseudoindividuals based on total HEFI-2019 score */ 
+	proc rank data=baselib.usintake_mc_t0 groups=4 out=baselib.usintake_mc_t0; 
+	var HEFI2019_TOTAL_SCORE ; 
+	ranks catscore ; 
+	run; 
+ 
+	/* add constant so <catscore> ranges from 1 to 4 (instead of 0 to 3) */ 
+	data baselib.usintake_mc_t0 ; 
+		set baselib.usintake_mc_t0 ; 
+	catscore = catscore+1 ; 
+	run; 
+ 
+/* Loop each component through the <percentiles_Survey> macro */ 
+ 
+	/* note: a short macro is used for efficiency */ 
+	 
+	%macro loop(list); 
+		%local ith comp; 
+	 
+	/* loop through list */ 
+		%do ith=1 %to 11; 
+			%let currentVar = %scan(&list, &ith); 
+	 
+	    %percentiles_Survey(data      = baselib.usintake_mc_t0 , 
+	                        byvar     = catscore , 
+	                        var       = currentVar , 
+	                        weight    = weight_nw_sumw_div, 
+	                        cutpoints = , 
+	                        print     = N, 
+	                        ntitle    = 3 
+	                        ); 
+	 
+		/* save data for current variable */ 
+		data loop&ith; 
+		set _percentiles(drop=variance); 
+		length varname $ 32; 
+		c = &ith.; 
+		varname = "&currentVar" ; 
+		run; 
+	 
+		%end; /* end of loop */ 
+	 
+	/* append data */ 
+		data baselib.distriball_w_catscore0; 
+		retain replicate c varname catscore; 
+			set loop1-loop11; 
+		* indicate that current data is for original sample ; 
+		replicate=0; 
+		run; 
+	 
+	 
+	%mend loop; 
+ 
+/* Call the loop with HEFI-2019 score components and total score */ 
+%loop(HEFI2019C1_VF HEFI2019C2_WHOLEGR HEFI2019C3_GRRATIO HEFI2019C4_PROFOODS  
+	HEFI2019C5_PLANTPRO HEFI2019C6_BEVERAGES HEFI2019C7_FATTYACID HEFI2019C8_SFAT  
+	HEFI2019C9_FREESUGARS HEFI2019C10_SODIUM HEFI2019_TOTAL_SCORE);
 
  /*************************************************************************/
  /*                                                                       */
