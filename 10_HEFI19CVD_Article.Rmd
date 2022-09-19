@@ -1,0 +1,1590 @@
+---
+title: "Greater adherence to the 2019 Canada’s Food Guide recommendations on healthy food choices reduces the risk of cardiovascular disease in adults: a prospective analysis of UK Biobank data"
+author: "Didier Brassard, Hasanga D. Manikpurage, Sébastien Thériault, Benoît J. Arsenault, Benoît Lamarche"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  bookdown::html_document2:
+     number_sections: FALSE
+     toc: true
+     toc_float: true
+---
+
+```{r setup}
+
+# ********************************************** #
+#                Markdown output                 #
+# ********************************************** #
+
+## Is the output for MS word?
+OUTPUT_WORD <- "N"
+  # if "Y", gt objects are saved as .docx file
+
+# ********************************************** #
+#              Relative file paths               #
+# ********************************************** #
+
+## file path 
+path <- "."
+
+  # note: files were initially stored on external drive, hence use of <path>
+
+results_dir <- file.path(path,"Results")
+nci_mcmc_model_dir <- file.path(path,"NCI","MCMC_f","Results")
+nci_mcmc_corr_dir <- file.path(path,"NCI","MCMC_distrib","Corr")
+nci_mcmc_distrib_dir <- file.path(path,"NCI","MCMC_distrib","Results")
+manuscript_dir <- file.path(path,"Manuscript","Article")
+
+# ********************************************** #
+#                Markdown set-up                 #
+# ********************************************** #
+
+knitr::opts_chunk$set(
+    echo = FALSE,
+    fig.env = "figure",
+    fig.pos = "p",
+    fig.align = "center",
+    message = FALSE,
+    warning = FALSE,
+    dpi = 300,
+    out.width = "80%",
+    fig.env="figure"
+    )
+
+## suppress scientific notation
+options(scipen = 9999)
+
+set.seed(12345)
+
+# ********************************************** #
+#             Load required packages             #
+# ********************************************** #
+
+## data management
+library(haven)
+library(tidyverse)
+library(scales)
+
+## results presentation
+library(DiagrammeR)
+library(rsvg)
+library(ggplot2)
+library(patchwork)
+library(gt)
+library(tinytex)
+library(MetBrewer)
+
+# ********************************************** #
+#      In-house functions for present work       #
+# ********************************************** #
+
+## make95ci macro (to auto format 95%CI based on input data)
+
+make95ci <- function(x,sep=", ",rounding=0.01,reverse=0,add_suffix=""){
+  lcl <- paste0(scales::number(x$lcl95,accuracy=rounding),add_suffix)
+  ucl <- paste0(scales::number(x$ucl95,accuracy=rounding),add_suffix)
+  if(reverse==0){
+  # Regular ordering, estimate (LCL to UCL)
+    return(
+      noquote( paste0(lcl,sep,ucl) )
+    )
+  } else {
+    # Reversed ordering, estimate (UCL to LCL)
+    return(
+      noquote( paste0(ucl,sep,lcl) )
+    )
+  }
+  
+}
+
+## makeEstimate macro (to format mean(SD) within mutate step for example)
+
+makeEstimate <- function(est,var,rounding=0.1){
+  paste0( scales::number(est,accuracy = rounding,big.mark=",")," (",scales::number(var,accuracy = rounding,big.mark=",",),")")
+}
+
+## saving gt object vs. printing directly
+  gtsave_select <- function(object,label,picture){
+if(picture == "Y"){
+  # save as picture
+ object %>%
+    gt::gtsave(file.path(manuscript_dir,paste0(label,".docx")))
+} else {
+  # print gt object directly
+  object
+}
+  
+}
+
+## GT Table style
+  gtstyle <- function(gtobject,footnote_marker="numbers"){
+    gtobject %>%
+      gt::tab_style(
+        style = list(
+          cell_text(weight = "bold")  ),
+        locations = cells_row_groups(groups = everything())
+      ) %>%
+      gt::opt_align_table_header("left") %>%
+      gt::opt_footnote_marks(marks=footnote_marker)
+  }
+  
+## survival curve plot
+  survivalcurveplot <- function(indata,maxtime_manual=0,min_y=0.95,max_y=1){
+    
+    # note: assuming time is coded as `time_to_primary` (months), that HEFI2019_exposure* is defined
+  
+    # ********************************************** #
+    #             Auto-select color hue              #
+    # ********************************************** #
+    
+    # 1) count number of categories (based on <HEFI2019_exposure> variable)
+    n_exposure <- 
+      indata %>%
+      dplyr::distinct(HEFI2019_exposure) %>%
+      dplyr::count(name="n") %>% 
+      dplyr::mutate(n=n-1)  #note: assuming that we always have as many level above and below
+    
+    # 2) Check compatibility: assuming that we may have 2 or 3 levels, but not more or less
+    if((n_exposure/2) > 3 | (n_exposure/2) < 2) {
+      message("Function not made for such exposure input!")
+      stop()
+      }
+    
+    # 3) Assign
+    if((n_exposure/2)==2) { 
+      color_exposure <- c('#424242', # Median
+                          '#e31a1c', # p10
+                          '#fd8d3c', # p25
+                          '#78c679', # p75
+                          '#238443') # p90
+    } else { 
+      color_exposure <- c('#424242', # Median
+                          '#fd8d3c', # p10
+                          '#fecc5c', # p25
+                          '#e31a1c', # p5
+                          '#c2e699', # p75
+                          '#78c679', # p90
+                          '#238443') # p95
+    }    
+    
+    # ********************************************** #
+    #              Set proper time zero              #
+    # ********************************************** #    
+    
+    # 1) Edit data frame to reflect that risks are estimated at the END of each interval
+    ## Create initial value
+    zero <- indata[indata$time_to_primary==0,]
+    zero$estimate <- 1
+    ## Add 1 to time unit (i.e., end of each interval)
+    indata$time_to_primary <- indata$time_to_primary+1
+    ## Append zero with other time point
+    indata <- rbind(zero,indata)
+    
+    # 2) Output max. time of follow-up
+    if(maxtime_manual>0){
+      # user-defined maximum time
+      maxtime <- maxtime_manual
+    }else {
+      # no time, get max. from data
+      maxtime <- max(indata$time_to_primary)
+    }
+    
+    # ********************************************** #
+    #              Plot survival curve               #
+    # ********************************************** #
+    
+    return(
+      indata %>% 
+        ggplot2::ggplot(.,aes(x=(time_to_primary/12),y=estimate,group=HEFI2019_exposure)) +
+        ggplot2::geom_line(aes(colour=HEFI2019_exposure),size=1,show.legend = FALSE) + 
+        ggplot2::coord_cartesian(ylim=c(min_y, max_y)) + 
+        ggplot2::scale_x_continuous(breaks = seq(0, (maxtime/12), by = 2)) +
+        ggplot2::scale_y_continuous(sec.axis = dup_axis(
+          breaks = indata[indata$time_to_primary==maxtime,]$estimate,
+          labels = indata[indata$time_to_primary==maxtime,]$HEFI2019_exposure_full2,
+          name=NULL
+        )) +
+        scale_color_manual(values=color_exposure)+
+        ggplot2::theme_bw() + 
+        ggplot2::theme(
+          panel.grid.minor.x = element_blank()
+        ) +
+        ggplot2::labs(x="Time since baseline, y",
+                      y="Probability of remaining CVD-free"
+        )
+    ) # end of return
+  }
+
+# ********************************************** #
+#                Labels and names                #
+# ********************************************** #
+  
+  ## HEFI-2019 component labels
+  complabelstidy <- 
+      c(HEFI2019C1_VF = 'Vegetables and fruits',
+        HEFI2019C2_WHOLEGR = 'Whole-grain foods',
+        HEFI2019C3_GRRATIO = 'Grain foods ratio',
+        HEFI2019C4_PROFOODS = 'Protein foods',
+        HEFI2019C5_PLANTPRO = 'Plant-based protein foods',
+        HEFI2019C6_BEVERAGES = 'Beverages',
+        HEFI2019C7_FATTYACID = 'Fatty acids ratio',
+        HEFI2019C8_SFAT = 'Saturated fats',
+        HEFI2019C9_SUGARS = 'Free sugars',
+        HEFI2019C10_SODIUM = 'Sodium')
+  
+  ## Covariates
+  
+  covar_list <- c('Sex',
+                  'Age',
+                  'Region',
+                  'Townsend deprivation index',
+                  'University degree',
+                  'Employment',
+                  'Familial history of cardiovascular disease',
+                  'Menopausal status (female only)',
+                  'Hormone replacement use (female only)',
+                  'Smoking habits',
+                  'Physical activity level',
+                  'Alcohol consumption habits',
+                  'Sedentary time',
+                  'Body mass index',
+                  'Dietary supplement use',
+                  'Medication use',
+                  'Self-reported risk factor (high cholesterol and/or high blood pressure)',
+                  'Energy intake')
+
+# ********************************************** #
+#             Data with repeated use             #
+# ********************************************** #
+
+# Flow chart data
+  flowchart_data <-
+  haven::read_sas(file.path(results_dir,"flowchart.sas7bdat")) %>% 
+  dplyr::mutate(
+    included=scales::comma(included))
+
+  ## Output final eligible sample
+  eligible_n <- flowchart_data[nrow(flowchart_data),]$included
+  
+  ## Output final eligible sample uncensored
+  eligible_uncensored_n <- 
+  haven::read_sas(file.path(results_dir,"table1_censoring.sas7bdat")) %>% 
+  dplyr::mutate(Category =stringr::str_trim(Category, side = "left"),
+                Frequency_fmt = scales::comma(Frequency)) %>% 
+  dplyr::filter(Category=="cens_primary",Level=="0") %>% 
+  pull(Frequency_fmt)
+
+# import exposure data
+exposure <- 
+  haven::read_sas(file.path(nci_mcmc_model_dir,"inexposure.sas7bdat")) %>% 
+  dplyr::select(p,energy,hefi) %>% 
+  dplyr::rename(HEFI2019_TOTAL_SCORE=hefi) %>% 
+  dplyr::filter(p>=5,p<=95) # force 5-95th percentile  
+  
+```
+
+```{r abstract-data, ref.label=c('screening-data','surv-all-data')}
+
+# Note: call all chunks needed using <ref.label> to avoid duplication of code
+
+```
+
+# Abstract {.unnumbered}
+
+**Background**: The Canada’s Food Guide (CFG) was profoundly revised in 2019, but the extent to which adherence to recommendations on healthy food choices reduces the risk of cardiovascular disease (CVD) is unknown.
+
+**Objective:** The aim of this study was to examine how greater adherence to the 2019 CFG’s recommendations on healthy food choices influences the risk of incident CVD.
+
+**Methods**: Participants were a sample of adults without history of CVD, diabetes or cancer from the UK Biobank prospective cohort study. Usual dietary intakes were estimated by modeling data from repeated web-based 24-h dietary recalls using the National Cancer Institute multivariate method. Adherence to key CFG’s recommendations on healthy food choices was assessed using the Healthy Eating Food Index (HEFI)-2019. The CVD outcome was a composite of fatal and non-fatal myocardial infarction and ischemic stroke. Cox regression models adjusted via inverse probability weighting were used to estimate CVD risks. Counterfactual models were used to interpret risks of hypothetical changes in the HEFI-2019 score.
+
+**Results**: A total of `r noquote(flowchart_data[nrow(flowchart_data),]$included)` participants met the eligibility criteria (`r round(n_p_females$Percent)`% females, mean age of `r round(AgeAt24hr$Mean,1)` years, range `r noquote(AgeAt24hr$range)` years). During the `r round(max(surv_RR50$time_to_primary)/12)`-year follow-up, there were `r noquote(event_primary$n_fmt)` cases of incident CVD. Compared with no change in the HEFI-2019 score, increasing the HEFI-2019 score of all participants to the 90^th^ percentile of the score distribution (`r surv_RR50[surv_RR50$t1==90,]$HEFI2019_TOTAL_SCORE` points) would hypothetically reduce the risk of CVD by `r round((1-surv_RR50[surv_RR50$t1==90,]$estimate)*100)`% (relative risk, `r round(surv_RR50[surv_RR50$t1==90,]$estimate,2)`; 95%CI: `r make95ci(x=surv_RR50[surv_RR50$t1==90,])`; absolute risk difference, `r round(surv_RD50[surv_RR50$t1==90,]$estimate,2)`%).
+
+**Conclusions**: These results suggest that greater adherence to the 2019 CFG recommendations on healthy food choices reduces the 11-year risk of CVD in middle-aged and older adults.  
+
+**Keywords:** Healthy Eating Food Index, HEFI-2019, Canada’s Food Guide, CFG, cardiovascular disease, CVD, dietary guidelines, causal inference, 24-h dietary recalls
+
+\newpage
+
+# Introduction
+
+Diet is an important modifiable risk factor that influences chronic disease-related morbidity and mortality worldwide (1, 2). For example, dietary risks are estimated to account for more than 14% of cardiovascular disease (CVD)-related mortality in Canada (1). Despite some improvements between 2004 and 2015, the health-related economic burden associated with poor diet quality remains high in Canada (3). National dietary guidelines, including Canada’s Food Guide (CFG), aim to address these dietary risks by providing guidance to improve individual dietary habits as well as the food environment and food services. 
+
+The CFG was revised in 2019 to promote healthy dietary habits and behaviors aiming to reduce CVD risk (4, 5) based on the most recent evidence on the relationship between diet and the risk of chronic diseases (6). Compared with the recommendations in the 2007 version of the CFG, which were stated in terms of sex and age-specific number of food servings to consume every day, the CFG-2019 provides more flexible and less specific recommendations. For example, CFG-2019 recommends eating a variety of healthy foods each day (“eat plenty of vegetables and fruits, whole grains and protein foods”) or emphasizes foods and beverages to consume more often (for example, “choose protein foods that come from plants more often”, “make water your drink of choice”), with no specific recommendations based on sex or age (4, 5). However, the extent to which adherence to the 2019 CFG’s recommendations does modify the risk of CVD is unknown. Such information is invaluable not only to confirm that adherence to the revised guidelines does indeed reduce the risk of CVD but also to inform future guidelines in Canada, hence further supporting public health action in the realm of food and health. 
+
+Thus, our objective was to verify the hypothesis that a higher degree of adherence to CFG’s recommendations on healthy food choices reduces the risk of incident CVD. For that purpose, we used publicly available data from the UK Biobank, a large prospective study, as well as the recently developed HEFI-2019, an index that measures the degree of adherence to recommendations on healthy food choices in the 2019 CFG (7, 8). More precisely, we used a causal inference approach based on counterfactual models to emulate a dietary intervention yielding various degrees of adherence to CFG’s recommendations on healthy food choices and their impact on incident CVD risk.
+
+\newpage
+
+# Methods
+
+## Participants and follow-up
+
+Participants were adults from the UK Biobank, which collected data from more than 500,000 males and females aged between 40 and 69 years recruited in the United Kingdom (UK) between 2006 and 2010 (9, 10). At the time of recruitment, participants completed multiple questionnaires and interviews covering sociodemographic data, lifestyle, history of diseases as well as physical measures assessment and blood sampling (9). To be included in the present analysis, participants had to be free of CVD, diabetes or cancer at baseline. Eligible participants also had to have completed at least one 24-h dietary recall reporting 100 kcal or more, to have a urine assay and to provide complete data on familial history of disease and physical activity (**Supplementary Table 1**). Baseline was defined as the date when participants completed their first 24-h dietary recall, between the years 2009 and 2012. Follow-up duration was calculated in months using the date of the first incident CVD event, the date of mortality, or end of follow-up (February 1st, 2021), whichever came first, minus the baseline date. These analyses were conducted under UK Biobank data application #25205.
+
+## Disease outcome: major CVD events
+
+The primary outcome was a composite of fatal and non-fatal myocardial infarction (International Classification of Diseases (ICD)-10 code I21), and ischemic stroke (ICD-10 code I63). Most CVD events (>75%) were identified based on hospital admission data (**Supplementary Table 2**). The study included no secondary outcomes.
+
+
+## Diet exposure: adherence to the 2019 CFG recommendations on healthy food choices
+
+Detailed dietary intakes were assessed using repeated web-based 24-h dietary recalls intake data obtained with the Oxford WebQ (9, 11, 12). The Oxford WebQ is not based on the Automated Multiple-Pass Method, but rather assesses intakes of up to 206 commonly consumed foods and 32 types of beverages (11, 13). All foods and drinks were classified according to the HEFI-2019 food and beverage categories (**Supplementary Figure 1**) (7). Total nutrient intakes were derived from the reported food and beverage intakes and food composition data corresponding to foods available at the time of questionnaire completion. The original food composition database of the Oxford WebQ does not provide data on sodium and free sugar intakes, which contribute to two key components of the HEFI-2019. The 24-h sodium intake was estimated based on casual urinary sodium, potassium and creatinine and predictive equation of the INTERSALT study (detailed in supplementary methods, p.4) (14). The intake of free sugars was estimated as the difference between total sugars intake and the calculated natural sugars contribution from vegetables, fruits, dairy foods and legumes (detailed in supplementary methods, p.4). The HEFI-2019 was used to measure adherence to the 2019 CFG’s recommendations on healthy food choices using usual dietary intake data estimated from the 24-h dietary recalls (see below) (7, 8). The description of components, points and standards for scoring is presented in Supplementary Methods (**Supplementary Table 3**). The HEFI-2019 has 10 components, 5 on foods, 1 on beverage and 4 on nutrients, each capturing adherence to the key 2019 CFG’s recommendations on healthy food choices. Points are allocated proportionally between cut-offs that reflect in large part the extent to which intakes of foods within each component are consistent with key CFG’s recommendations (Supplementary Table 3). The total HEFI-2019 is calculated as the sum of all components’ scores on a total of 80 points, with higher scores reflecting greater adherence to recommendations. Evaluation metrics of the HEFI-2019 supported construct validity. For example, validation studies based on data from the 2015 Canadian Community Health Survey - Nutrition have shown that the HEFI-2019 score was strongly correlated with the Healthy Eating Index (HEI)-2015 (r=0.79), assessed multiple dimensions of healthy eating and had acceptable internal consistency (Cronbach’s alpha=0.66) (8).
+
+## Covariates
+
+Model covariates were selected based on their ability to 1) mitigate confounding of the relationship between the HEFI-2019 score and incident CVD; and 2) mitigate the impact of an unobserved propensity towards health-seeking behaviors (10). Covariates were sex, age, region, Townsend deprivation index, university degree education, employment status, familial history of CVD, menopausal status (female only), hormone replacement use (female only), smoking habits, physical activity level, alcohol consumption habits, sedentary time, body mass index, dietary supplement use, medication use, self-reported CVD risk factors (high cholesterol and/or high blood pressure), and energy intake. The Townsend deprivation index indicates the degree of material deprivation according to census data on unemployment, car ownership, household overcrowding and owner occupation and the participant’s postcode (15). Continuous covariates were transformed a priori as restricted cubic splines (16, 17). A single imputation was performed to account for the remaining proportion of missing data (<2.0%). Complete details regarding covariate sources, modelling and proportion with missing data are presented in **Supplementary Table 4**. Covariates were only assessed at baseline.
+
+## Statistical analyses
+
+The causal inference approach based on counterfactuals emulated a dietary intervention (18-20) yielding various degrees of adherence to the 2019 CFG recommendations in this population at baseline and their hypothetical impact on incident CVD. This involved five steps to account for measurement error in dietary intakes, mitigate bias due to confounding or censoring and estimate variance. Details regarding steps 1-4 are presented in the Supplementary Methods (p. 11-14).  
+
+First, the distribution of HEFI-2019 score was estimated at the population level to identify predetermined HEFI-2019 score percentiles (5th, 10th, 25th, 50th, 75th, 90th and 95th). Dietary intakes measured using 24-h dietary recalls are affected by within-individual random errors (21), which can cause bias (22, 23). To mitigate this issue, we used the National Cancer Institute (NCI)’s multivariate method (24), which estimates distribution of usual dietary intakes (i.e., long-term average) when data from repeated 24-h dietary recalls are available in all or only a proportion of the study sample. The large sample size (n=`r noquote(eligible_n)`; **Figure 1**), and the availability of repeated 24-h dietary recalls in most participants (62%) are sufficient to estimate usual dietary intakes with the NCI multivariate method (25).  
+
+Second, usual dietary intakes were simulated at the participant level with the NCI multivariate method to obtain measurement-error-corrected regression coefficients in diet-outcome models described below. All covariates described above were included in this step as well as the predicted 24-h sodium intake based on the urine assay. One thousand simulations of “usual intakes” per participant were generated in the Monte Carlo simulation step of the NCI multivariate method. The total HEFI-2019 score was calculated based on the simulated usual dietary intakes. A restricted cubic spline transformation with 4 knots (percentiles 5, 35, 65 and 95) was applied to the HEFI-2019 score and energy intake to consider potential non-linear association with the outcome (26). Simulated usual intakes and HEFI-2019 scores were then averaged across simulations before the next step.  
+
+Third, confounding was considered using inverse probability of “treatment” weighting (IPTW) estimated via linear regression (27, 28). The HEFI-2019 score was approximately normally distributed, and a “standard normal” modelling approach was used, i.e., assuming a normal distribution for the total HEFI-2019 score (27). To estimate IPTW, the HEFI-2019 score was regressed on all covariates, except energy intake which was considered as a covariate only in the outcome model in the next step. A probability density function was then estimated based on the total HEFI-2019 score of each individual, predicted values and variance of the linear regression model. Weights were calculated as the inverse of this probability density function. Informative censoring due to mortality or lost to follow-up was considered with inverse probability of censoring weighting (IPCW) estimated via logistic regression (29). The use of IPCW is a working framework to estimate the (direct) effect of a hypothetical intervention in the presence of competing events (e.g., mortality due to cancer) (29). Weights estimated in both procedures (i.e., IPTW and IPCW) were stabilized to the sample size separately and then combined before the next step. A covariate balance plot is shown in **Supplementary Figure 2**.  
+
+Fourth, the energy-adjusted relationship between the total HEFI-2019 score based on usual intakes and incident CVD was analyzed using Cox proportional hazards regression models. Each participant was weighted using the stabilized inverse probability weights estimated in the previous step to adjust for both confounding and informative censoring. Both the HEFI-2019 score and energy intake were modelled as continuous variables with a restricted cubic spline transformation. The Cox regression model parameters for the HEFI-2019 and energy intake were then used to generate "adjusted” survival curves (30) at each of the predetermined percentiles of HEFI-2019 score estimated in step 1. The mean energy intake in this sample (`r exposure[1,]$energy*1000` kcal) was used for all survival curves, thus ensuring that energy intake remained constant across percentiles of HEFI-2019. The impacts of hypothetical changes in the HEFI-2019 score on the 11-year risk of CVD were estimated by calculating relative and absolute difference between the probability of incident CVD, had all participants achieved prespecified percentiles of HEFI-2019 scores, and the probability of incident CVD at the median HEFI-2019 score (i.e., no change; the reference) in this sample. More information on this is provided in the Supplementary Methods (p. 14).  
+
+Fifth, steps 2 to 4 were repeated independently 250 times to estimate variance via parametric bootstrap. On the one hand, standard or robust variance estimator may be used to estimate variance in Cox regression models when dietary intake data reflect usual intakes. On the other hand, such approach would not account for the measurement error correction modelling performed using the NCI method. Thus, we opted for a bootstrap variance estimation to best account for uncertainty at all steps of the NCI multivariate method for measurement error correction (24), uncertainty in the estimation of inverse probability weights (31) as well as variance of the weighted Cox regression model (32).  
+
+Finally, sensitivity analyses were conducted to assess the plausibility of reported energy intake (cut-offs shown in **Supplementary Table 5**), present hazards of CVD across the distribution of HEFI-2019 score using a more traditional approach, to verify proportional hazards of the Cox regression models and to examine the modification by sex of the relationship between the HEFI-2019 and CVD risk. The E-value was calculated to assess the extent to which an unmeasured confounder could explain the observed effect estimates (33). Analyses were performed in SAS Studio v3.81 (SAS Institute) and R v4.1.3 (R Foundation for Statistical Computing).  
+
+\newpage
+
+# Results
+
+## Characteristics of participants
+
+```{r screening-data}
+
+# *********************************************************************** #
+#              1. import and format (detailed) table 1 data               #
+# *********************************************************************** #
+
+## Prepare table 1 data
+ table1_data <- 
+    haven::read_sas(file.path(results_dir,"table1.sas7bdat")) %>% 
+    dplyr::select(Category,Level,all,starts_with("cat_"),Percent,Frequency,`_TYPE_`) %>% 
+    dplyr::rename(type=`_TYPE_`) %>% 
+    # remove blanks that will otherwise mess with quoting
+    dplyr::mutate(
+      Category =stringr::str_trim(Category, side = "left"),
+      all      =stringr::str_trim(all, side = "left") ,
+      Level    =stringr::str_trim(Level, side = "right")
+    )
+
+## Categorize data by continuous/numerical
+table1_data$typef <- factor(table1_data$type,levels=c(1,2),labels = c("Mean (SD)","Percent"))
+   
+  ### Split the `all` column for easier referencing in manuscript
+   table1_data_all <- 
+     table1_data %>% 
+     dplyr::select(Category, Level, all,Percent,Frequency) %>% 
+     dplyr::filter(Level !="Mean (SD)") %>% 
+     tidyr::separate(.,all,into = c("n_fmt","percent_fmt"),sep=' ', remove=FALSE)  %>% 
+     # Format the percent column
+     dplyr::mutate(
+       percent_fmt =  gsub(')','%)',percent_fmt),
+       all = gsub(')','%)',all)
+     )
+
+  ## extract relevant characteristics for easier read
+    n_p_females  <-
+      table1_data_all[table1_data_all$Level=="Females",]
+    
+    mean_sd_age <-
+      table1_data[table1_data$Category=="AgeAt24hr",]
+    
+    n_p_edu <-
+      table1_data_all[table1_data_all$Category=="education0",] %>%
+      dplyr::slice_tail() # slicing tail in case the name changes
+
+# *********************************************************************** #
+#        2. Flowchart figure: import data and make dynamic figure         #
+# *********************************************************************** #
+## Import data
+
+    ### note: Flow chart data import has been added in the `set-up` chunk
+
+## Make figure using DiagrammeR
+  flowchart_fig<-
+    DiagrammeR::grViz("
+  digraph flowchart {
+  
+  graph [layout = dot]
+  
+  # node definitions with substituted label text
+  node [shape = rectangle, width = 4, fillcolor = Biege]
+  a [label = '@@1']
+  b [label = '@@2']
+  c [label = '@@3']
+  d [label = '@@4']
+  e [label = '@@5']
+  #x [label='Excluded']
+  
+  a -> b -> c -> d -> e
+  #b -> x
+  
+  }
+  
+  [1]: paste0('UK Biobank participants (n = ', flowchart_data[1,2], ')')
+  [2]: paste0('Excluding withdrawals (n = ', flowchart_data[2,2], ')')
+  [3]: paste0('Completed at least 1 valid 24-h dietary recall and urine assay (n = ', flowchart_data[3,2], ')')
+  [4]: paste0('Free of cardiovascular disease, diabetes or cancer at 24-h dietary recall completion (n = ', flowchart_data[4,2], ')')
+  [5]: paste0('Complete data on most covariates (n = ', flowchart_data[5,2], ')')
+  ")
+  
+## Convert diagrammeR flowchart to SVG, then save as pdf file
+  tmp = DiagrammeRsvg::export_svg(flowchart_fig)
+  tmp = charToRaw(tmp) # flatten
+  rsvg::rsvg_png(tmp, file.path(manuscript_dir,"Fig1_flowchart.png"))
+  rsvg::rsvg_pdf(tmp, file.path(manuscript_dir,"Fig1_flowchart.pdf"))
+
+# *********************************************************************** #
+#          3. Miscellaneous information: import and format data           #
+# *********************************************************************** #
+
+# Pertaining to events, censoring, source, etc
+event_misc <- 
+  haven::read_sas(file.path(results_dir,"event_misc.sas7bdat")) %>%
+  # remove lead and trail blanks
+  dplyr::mutate(
+    Category = stringr::str_trim(Category, side = "both"),
+    Stat = stringr::str_trim(Stat, side = "both"),
+    Stat =gsub(')','%)',Stat)) %>% 
+  # split the formatted field
+  tidyr::separate(.,Stat,into = c("n_fmt","percent_fmt"),sep=' ', remove=FALSE) 
+
+# detailed data on censoring
+censoring_misc <- 
+  haven::read_sas(file.path(results_dir,"table1_censoring.sas7bdat")) %>% 
+  dplyr::mutate(
+    Category = stringr::str_trim(Category, side = "both"),
+    Stat = stringr::str_trim(Stat, side = "both"),
+    Stat =gsub(')','%)',Stat),
+    Frequency_fmt = scales::comma(Frequency)) 
+
+  ## Extract relevant information for easier read
+  event_primary <-
+    event_misc %>% 
+    dplyr::filter(Category=="event_primary",Level==1)
+  event_i21 <-
+    event_misc %>% 
+    dplyr::filter(Category=="event_i21",Level==1)
+  event_i63 <-
+    event_misc %>% 
+    dplyr::filter(Category=="event_i63",Level==1)
+  fatal_cens <-
+    event_misc %>% 
+    dplyr::filter(Category=="cens_death",Level==1)
+  lost_cens <- 
+    censoring_misc %>% 
+    dplyr::filter(Category=="lost_flag",Level==1)
+  
+# Primary outcome, by sex (duplicate of <survbysexdata>)
+  ## Crude events proportion
+  crudeEvent_bysex <- 
+    haven::read_sas(file.path(results_dir,"event_tsex.sas7bdat")) %>% 
+    dplyr::rename(males=sexmeno_4)
+
+  ## output descriptive statistics
+    n_males <- sum(crudeEvent_bysex[crudeEvent_bysex$males==1,]$COUNT)
+    n_females <- sum(crudeEvent_bysex[crudeEvent_bysex$males==0,]$COUNT)
+    crudeEvent_bysex <- crudeEvent_bysex %>% filter(event_primary==1)
+  
+# Primary outcome, but what went in the final model
+ events_primary_tfull <-
+   haven::read_sas(file.path(results_dir,"event_tfull.sas7bdat"))
+
+# Misc characteristics data
+ table1_misc <- 
+    haven::read_sas(file.path(results_dir,"table1_misc.sas7bdat"))
+ 
+ time_to_primary <-
+   table1_misc %>% 
+   dplyr::filter(Variable=="time_to_primary")
+
+  nrecall <-
+      table1_misc %>%
+      dplyr::filter(Variable=="r24_nrecall")
+ 
+  ## Make special data with AgeAt24hr information
+   AgeAt24hr <-
+      table1_misc %>%
+      dplyr::filter(Variable=="AgeAt24hr") %>% 
+      dplyr::mutate(range=paste0(round(Min),"-",round(Max)))
+    
+```
+
+Among the `r noquote(flowchart_data[2,] %>% pull(included))` participants in the UK Biobank, `r noquote(flowchart_data[nrow(flowchart_data),] %>% pull(included))` participants met all inclusion criteria (**Figure** \@ref(fig:flowchart)). Among them, slightly more than half of participants were females (`r round(n_p_females$Percent,1)`%) and had a `r noquote(tolower(n_p_edu$Level))` (`r round(n_p_edu$Percent,1)`%; **Supplementary Table 6**). Mean age was `r round(AgeAt24hr$Mean,1)` years (SD, `r round(AgeAt24hr$StdDev,1)`; range, `r noquote(AgeAt24hr$range)`). Most participants (`r round(table1_data_all[table1_data_all$Category=="r24_repeat",]$Percent[2])`%) completed more than one 24-h dietary recall (mean of `r round(nrecall$Mean,1)` `r noquote(paste("\u00B1"))` `r round(nrecall$StdDev,1)` (SD) recalls). Characteristics of participants are presented across quarters of total HEFI-2019 score in **Table 1**. Descriptive data on dietary intakes and HEFI-2019 scores are presented in **Supplementary Tables 7-11**.
+
+During the `r floor((time_to_primary$Max)/12)`-year follow-up, there were `r noquote(event_primary$n_fmt)` incident cases of fatal and non-fatal CVD (`r noquote(event_i21$n_fmt)` cases of myocardial infarction and `r noquote(event_i63$n_fmt)` cases of ischemic stroke), for an observed CVD incidence of `r round(event_primary$Percent,1)`%. Among those events, `r crudeEvent_bysex[crudeEvent_bysex$males==1,]$COUNT` (`r noquote(scales::percent(crudeEvent_bysex[crudeEvent_bysex$males==1,]$COUNT / sum(crudeEvent_bysex$COUNT)))`) occurred in males. A total of `r noquote(fatal_cens$Stat)` non-outcome deaths also occurred and `r noquote(lost_cens$Stat)` participants were lost during the follow-up.
+
+```{r flowchart, fig.cap="Study flowchart. Valid 24-h dietary recall corresponds to 24-h dietary recall with reported total energy intake of at least 100 kcal. Participants with missing data on familial history of cardiovascular disease or physical activity level were excluded."}
+
+knitr::include_graphics(file.path(manuscript_dir,"Fig1_flowchart.png"))
+
+```
+
+\newpage
+
+```{r table1-short}
+
+# *********************************************************************** #
+#               1. Import and format (short) table 1 data                 #
+# *********************************************************************** #
+
+## Prepare table 1 data based on shortened version
+ table1_data <- 
+    haven::read_sas(file.path(results_dir,"table1_short_rowpercent.sas7bdat")) %>% 
+    dplyr::select(Category,Level,all,starts_with("cat_"),Percent,Frequency,`_TYPE_`) %>% 
+    dplyr::rename(type=`_TYPE_`) %>% 
+    dplyr::mutate(
+      Category =stringr::str_trim(Category, side = "left"),
+      all      =stringr::str_trim(all, side = "left") ,
+      Level    =stringr::str_trim(Level, side = "right")
+    )
+
+## Categorize data by continuous/numerical
+table1_data$typef <-
+  factor(table1_data$type,levels=c(1,2),labels = c("Mean (SD)","Percent"))
+
+## Import cut-offs for quarters of total HEFI-2019 score based on average 24-hr data
+plausible_cv <-
+  haven::read_sas(file.path(results_dir,"plausible_cv.sas7bdat")) 
+
+## Import categorized hefi values
+tab1_cathefi <-
+  haven::read_sas(file.path(results_dir,"table1_cathefi_label.sas7bdat")) %>% 
+  dplyr::mutate(
+    # remove duplicate white space
+    label = stringr::str_squish(label)
+  )
+
+# *********************************************************************** #
+#                  2. Prepare labels for all categories                   #
+# *********************************************************************** #
+
+## Make label for all variables
+  table1_data$Category_label <- NA
+  table1_data$Category_label[table1_data$Category=='ageat24hr'] <- 'Age at dietary assessment, y'
+  table1_data$Category_label[table1_data$Category=='sedentary0'] <- 'Sedentary time, h/d'
+  table1_data$Category_label[table1_data$Category=='chol0'] <- 'Total cholesterol, mmol/L'
+  table1_data$Category_label[table1_data$Category=='ldlc0'] <- 'Low-density lipoprotein cholesterol, mmol/L'
+  table1_data$Category_label[table1_data$Category=='hdlc0'] <- 'High-density lipoprotein cholesterol, mmol/L'
+  table1_data$Category_label[table1_data$Category=='sbp0'] <- 'Systolic blood pressure, mm Hg'
+  table1_data$Category_label[table1_data$Category=='dbp0'] <- 'Diastolic blood pressure, mm Hg'
+  table1_data$Category_label[table1_data$Category=='sex_num'] <- 'Sex'
+  table1_data$Category_label[table1_data$Category=='region'] <- 'Region'
+  table1_data$Category_label[table1_data$Category=='british'] <- 'White/british ethnic background'
+  table1_data$Category_label[table1_data$Category=='famhist0'] <- 'Familial history of cardiovascular disease'
+  table1_data$Category_label[table1_data$Category=='education0'] <- 'Education level'
+  table1_data$Category_label[table1_data$Category=='employ0'] <- 'Employment situation'
+  table1_data$Category_label[table1_data$Category=='cat_deprivation'] <- 'Townsend deprivation index'
+  table1_data$Category_label[table1_data$Category=='roh0'] <- 'Alcohol consumption habits'
+  table1_data$Category_label[table1_data$Category=='smk0'] <- 'Smoking habits'
+  table1_data$Category_label[table1_data$Category=='bmi0'] <- 'Body mass index, kg/m\u00B2'
+  table1_data$Category_label[table1_data$Category=='physact0'] <- 'Physical activity level'
+  table1_data$Category_label[table1_data$Category=='dietchange0'] <- 'Major dietary habits change in the past 5 years'
+  table1_data$Category_label[table1_data$Category=='dietsuppl'] <- 'Dietary supplement use'
+  table1_data$Category_label[table1_data$Category=='rx0'] <- 'Medication use'
+  table1_data$Category_label[table1_data$Category=='meno0'] <- 'Menopausal status (female only)'
+  table1_data$Category_label[table1_data$Category=='hrt0'] <- 'Hormone replacement therapy (female only)'
+  table1_data$Category_label[table1_data$Category=='riskfactor'] <- 'Cardiovascular disease risk factor'
+  table1_data$Category_label[table1_data$Category=='reporter_num'] <- 'Plausibility of reported energy intakes'
+  
+  table1_data$Category_label[table1_data$Category=='r24_repeat'] <- 'Two or more 24-h dietary recalls completed'
+  
+# *********************************************************************** #
+#                2. Output final data and actual table 1                  #
+# *********************************************************************** #
+  
+  table1 <-
+  # ********************************************** #
+  #          Prepare data for use in gt()          #
+  # ********************************************** #
+    table1_data %>% 
+    # remove continuous variables not of main interest and repetitive levels
+    dplyr::filter(!(Category %in% c("chol0", "ldlc0", "hdlc0", "sbp0", "dbp0","rx0")),
+                  !(Level %in% c("No","None","Not sure","Below 30","Males","Never or previous"))
+                  ) %>% 
+    # drop previous `category` which has been replaced with labels
+    dplyr::select(-c(all,Percent,Frequency)) %>% 
+    dplyr::mutate(
+      # Make 1row labels:
+      Label1row = case_when(
+        ##  correspond label for continuous data
+        type     == 1 ~ Category_label,
+        ## case by case for other variables
+        Category == "sex_num" ~ Level,
+        Category == "region" ~ paste0(Category_label,", ",Level),
+        Category == "british" ~ Category_label,
+        Category == "famhist0" ~ Category_label,
+        Category == "education0" ~ Level,
+        Category == "employ0" ~ paste0(Category_label,", ",tolower(Level)),
+        Category == "cat_deprivation" ~ paste0(Category_label,", ",Level),
+        Category == "roh0" ~  "Current alcohol consumer", #paste0(Category_label,", ",Level),
+        Category == "smk0" ~  "Current smoker", #paste0(Category_label,", ",Level),
+        Category == "bmi0" & type !=1 ~ paste0("Body mass index \u2265 30 kg/m\u00B2 ") ,#paste0("Body mass index, ",Level)
+        Category == "physact0" ~ paste0(Category_label,", ",tolower(Level)),
+        Category == "dietchange0" ~ Category_label,
+        Category == "dietsuppl" ~ Category_label,
+        Category == "meno0" ~ Category_label,
+        Category == "hrt0" ~ Category_label,
+        Category == "riskfactor" ~ paste0("Self-reported ",tolower(Level)),
+        Category == "reporter_num" ~ paste0(Category_label,", ",tolower(Level)),
+        Category == "r24_repeat" ~ Category_label
+                )
+    ) %>% 
+  # group for easier reading
+    dplyr::group_by(typef) %>% 
+  # ********************************************** #
+  #             Output table with gt()             #
+  # ********************************************** #
+  gt::gt(.) %>%
+  gt::cols_hide(c(Category,Level,type,Category_label)) %>% 
+  gt::cols_move_to_start(Label1row) %>% 
+  gt::cols_label(
+    Label1row = "Characteristics",
+    cat_hefi_1 = paste0(tab1_cathefi[1,]$label,", n=34,174"),
+    cat_hefi_2 = paste0(tab1_cathefi[2,]$label,", n=34,175"),
+    cat_hefi_3 = paste0(tab1_cathefi[3,]$label,", n=34,175"),
+    cat_hefi_4 = paste0(tab1_cathefi[4,]$label,", n=34,174")
+    #note: flexible coding of value of quarter hefi are prioritized over sample sizes (hardcoded)
+    ) %>% 
+   gt::tab_style(
+     style = list(
+       cell_text(weight = "bold")  ),
+     locations = cells_column_labels(columns=everything())
+   ) %>%  
+  gt::tab_header(
+    title = md(paste0("**Table 1.** Baseline characteristics of UK Biobank participants included in this study (n=",eligible_n,"), by quarters of HEFI-2019"))) %>%
+  gt::tab_footnote(
+    footnote = paste0("Values are mean (SD) or row percentages. Percentages reflect the distribution of a given characteristic across quarters of total HEFI-2019 score. Quartiles of HEFI-2019 were estimated based on the average of raw intakes among all 24-h dietary recall completed. Thus, the quartiles do not reflect usual intakes and misclassification of individuals is expected. The plausibility of reported energy intakes was estimated using the method by Huang et al. Plausible reporting corresponded to a ratio of reported energy intake to predicted energy requirements within ",round(1-plausible_cv[1,"SD1"],2)," and ",round(1+plausible_cv[1,"SD1"],2),". See Supplementary Methods for details. HEFI-2019, Healthy Eating Food Index 2019; Q, quarter; max, maximum value; min, minimum value."),
+    location = cells_title("title")) %>%
+    gtstyle(.) 
+  
+# *********************************************************************** #
+#  Use <gtsave_select> function to print table directly or save as png    #
+# *********************************************************************** #
+  
+gtsave_select(table1,"Table 1",OUTPUT_WORD)
+  
+
+```
+
+\newpage
+
+## HEFI-2019 score
+
+```{r hefidistrib-data}
+
+# 0 Import sas7bdat files
+  ## All participants
+  mcmc_totw <-
+    haven::read_sas(file.path(nci_mcmc_distrib_dir,"distribtotal_w0.sas7bdat")) %>%
+    dplyr::mutate(mean_sd=makeEstimate(Mean,StdDev)) 
+  
+  ## By sex
+  mcmc_sexw <-
+    haven::read_sas(file.path(nci_mcmc_distrib_dir,"distribtotal_w_sex0.sas7bdat")) %>%
+    dplyr::mutate(mean_sd=makeEstimate(Mean,StdDev)) 
+  
+  
+```
+
+```{r radar-data}
+ 
+# *********************************************************************** #
+#                 Import and format data for Radar plot                   #
+# *********************************************************************** #
+
+ # 1) Make wide data with components as columns
+ radar_t <- 
+   haven::read_sas(file.path(nci_mcmc_distrib_dir,"distriball_w_catscore0.sas7bdat")) %>% 
+   ## Select HEFI component and total score
+   dplyr::slice(grep("HEFI",varname)) %>% 
+   ## remove differences and focus on extreme group
+   dplyr::filter(catscore %in% c(1,4),varname != "HEFI2019_TOTAL_SCORE") %>% 
+   ## select relevant variables for the purpose of radar graph
+   dplyr::select(c,varname,catscore,Mean) %>% 
+   ## add row id for the purpose of manually adding max. score
+   dplyr::group_by(catscore,c) %>% 
+   dplyr::mutate(## make id per group and component
+                 id=cur_group_id(),
+                 id=ifelse(catscore==4,id-10,id),
+                 ## Manual additional of max score
+                 maxscore = case_when(
+                   id ==1 ~ 20,
+                   id ==2 ~ 5,
+                   id ==3 ~ 5,
+                   id ==4 ~ 5,
+                   id ==5 ~ 5,
+                   id ==6 ~ 10,
+                   id ==7 ~ 5,
+                   id ==8 ~ 5,
+                   id ==9 ~ 10,
+                   id ==10 ~ 10 ),
+                 ## calculate each score over 10
+                 mean_std=Mean/maxscore
+                 ) %>%
+   dplyr::ungroup() 
+
+#2) Output half wide data to calculate differences
+radar_t_diff <- 
+  radar_t %>%
+  dplyr::select(varname,catscore,Mean) %>% 
+  pivot_wider(names_from = catscore,values_from = Mean,names_prefix = "mean_catscore") %>% 
+  ##add percentage diff
+  dplyr::mutate(
+    diff=(mean_catscore4-mean_catscore1),
+    pdiff = diff/mean_catscore1,
+    pdiff100 = round(pdiff*100,1)
+    )
+
+ ## Add label and sort
+ radar_t_diff$complabel <- complabelstidy
+
+# extract top1 or top3
+ q4q1_top <-
+   radar_t_diff %>%
+   slice_max(order_by=pdiff,n=3)
+ 
+ q4q1_bottom <-
+   radar_t_diff %>%
+   slice_min(order_by=pdiff,n=2)
+ 
+#3) Output double-wide data for radar chart
+radar <- 
+  radar_t %>% 
+   ## further drop useless variables
+   dplyr::select(varname,catscore,mean_std) %>% 
+   ## transpose to wide file
+   tidyr::pivot_wider(.,names_from = "varname",values_from="mean_std")
+
+
+```
+
+The mean total HEFI-2019 (SD) score on a scale of 80 points was `r noquote(mcmc_totw$mean_sd)` among all participants, `r noquote(mcmc_sexw[1,]$mean_sd)` in females and `r noquote(mcmc_sexw[2,]$mean_sd)` in males. The pattern of HEFI-2019 component scores is presented in **Figure** \@ref(fig:radar-plot). Compared with participants in the 1^st^ quarter of total HEFI-2019 score, participants in the 4^th^ quarter had relatively higher mean HEFI-2019 scores for most of the components, except for `r knitr::combine_words(q4q1_bottom$complabel)`.
+
+```{r radar-plot, fig.height=6, fig.width= 8,fig.cap="Radar plot depicting mean HEFI-2019 component scores for participants in the lowest and highest quarters of total HEFI-2019 score distribution in adults from the UK Biobank (n=34,174 each). The plot indicates which component scores contribute to the total HEFI-2019 score among participants with a relatively high total HEFI-2019 score in this sample, compared with participants with a relatively low total HEFI-2019 score. The HEFI-2019 was calculated based on usual dietary intakes collected using 24-h dietary recalls and modelled using the National Cancer Institute’s multivariate method (see Methods). Because each component score has a different scale (e.g., Vegetables and fruits is scored on 20 points while Protein foods is scored on 5 points), component scores were standardized to percentages, for comparability. HEFI-2019, Healthy Eating Food Index-2019; Q, quarter."}
+
+# *********************************************************************** #
+#                   Output radar plot and save figure                     #
+# *********************************************************************** #
+
+# Use text label so PDF export is successful
+radarlegendlabel <- expression("Q1 (39.5 pts or less)","Q4 (53.1 pts or more)")
+
+# 1) to use the fmsb package, add 2 lines to the dataframe: the max and min of each topic to show on the plot
+ radar2 <-
+   rbind(rep(1,10) , rep(0,10) , radar) %>% 
+   dplyr::select(-catscore)
+ 
+# 2) Make clean labels
+ radarlabel <- c('Vegetables and fruits',
+                 'Sodium',
+                 'Free sugars',
+                 'Saturated fats',
+                 'Fatty acids ratio',
+                 'Beverages',
+                 'Plant-protein foods',
+                 'Protein foods',
+                 'Grain foods ratio',
+                 'Whole-grain foods')
+  ### note: order reversed for component 2-10 so they appear clockwise in the Figure
+
+#3) Color for groups
+    group_colors <- MetBrewer::met.brewer("Juarez",n=2)
+ 
+# 4) actual radarChart
+    
+ # 4.1) Radar plot
+ #png(file.path(manuscript_dir,"Fig2_radar.png"))
+ #pdf(file.path(manuscript_dir,"Fig2_radar.pdf"))
+    
+  fmsb::radarchart( radar2[,c(1,10:2)], # data with reversed ordering so they appear clockwise
+            axistype=1, 
+             # custom pts
+             pty = (21:20),
+             #custom polygon
+             pcol=group_colors, pfcol=, plwd=4, plty=2:1 , 
+             #custom the grid
+             cglcol="grey", cglty=3,
+             axislabcol="grey",
+             caxislabels=seq(0,1,4),
+             cglwd=1.1,
+             #custom labels
+             vlabels=radarlabel,
+             vlcex=0.7,
+             calcex=0.7
+             )
+
+ # 4.2) Legend
+ legend(x=0.73, y=1.25,
+        legend = radarlegendlabel,
+        bty = "n",
+        pch=c(21,20),
+        #horiz=TRUE,
+        col= group_colors,
+        text.col = group_colors,
+        cex=0.7, pt.cex=1.0)
+ 
+ #dev.off()
+ 
+ # knitr::include_graphics(path=file.path(manuscript_dir,"Fig2_radar.png"))
+
+
+```
+
+\newpage
+
+## Incident CVD
+
+```{r surv-all-data}
+
+# *********************************************************************** #
+#        Import and format data for survival curve and estimates          #
+# *********************************************************************** #
+
+# Define 50th percentile as the reference level
+t0 <- 50
+
+# 0) import all survival curves
+  survivalcurve_all <- 
+    haven::read_sas(file.path(nci_mcmc_model_dir,"survivalplotf.sas7bdat")) %>% 
+    dplyr::filter(time_to_primary %% 6 == 0 | time_to_primary==max(time_to_primary))
+  
+    ## extract median value (the `no dietary change` value)
+    survival_ref <-
+      survivalcurve_all[survivalcurve_all$p==t0,]$HEFI2019_TOTAL_SCORE[1]
+    
+    ## add to survival curve data to caclulate differences
+    survivalcurve_all$ref <-
+      survival_ref
+
+  ## define curve labels  
+  survivalcurve_all <- 
+  survivalcurve_all %>% 
+  dplyr::mutate(
+  ## make label indicating the degree of change vs. "no dietary change"
+      HEFI2019_exposure=ifelse(p==t0,
+                               "Median",
+                               paste0("Percentile ",p)),
+      sign = ifelse(HEFI2019_TOTAL_SCORE<ref,'','+'),
+      HEFI2019_exposure_full2 = ifelse(p==t0, 
+                                      paste0("Median (", ref," pts)"),
+                                      paste0("Percentile ",p," (",sign,HEFI2019_TOTAL_SCORE-ref," pts)"))
+  ) %>% 
+  dplyr::select(-sign)
+  
+# *********************************************************************** #
+#     Prepare data for survival difference/ratio at given percentile      #
+# *********************************************************************** #
+
+# output contrasts of survival curve
+surv_contrasts_p50 <- 
+  haven::read_sas(file.path(nci_mcmc_model_dir,"survivalcontrastf.sas7bdat")) %>% 
+  # keep only contrasts, at full time to follow-up
+  dplyr::filter(type!="P(outcome)",
+                time_to_primary==max(time_to_primary)) %>%
+  # keep only contrasts with p50 as reference
+  dplyr::slice(grep("_p50",name)) %>% 
+  dplyr::select(-c(p,type)) %>% 
+  # split t0 and t1 for easier call
+  tidyr::separate(name,into=c("type","t1","t0"),sep='_') %>% 
+  # change to numerical
+  dplyr::mutate(
+    t0=as.numeric(gsub('p','',t0)),
+    t1=as.numeric(gsub('p','',t1)),
+    ## reverse comparison for contrasts below p50
+    across(c(estimate,lcl95,ucl95),
+       ~ ifelse(t0<50,
+                ifelse(type=="RD",-.x,1/.x)
+                ,.x)
+      ),
+    t1b=ifelse(t0<50,t0,t1),
+    t0b=ifelse(t0<50,t1,t0)
+  ) %>% 
+  dplyr::select(-c(t0,t1,estimate_ci,estimate_se,`_ci`,`_se`)) %>% 
+  dplyr::rename(t0=t0b,t1=t1b)
+
+# combine labels of survival curves with outcome diff. and ratio
+surv_contrasts_p50 <- 
+  survivalcurve_all %>% 
+  dplyr::distinct(HEFI2019_TOTAL_SCORE,.keep_all = TRUE) %>% 
+  dplyr::select(p,ref,starts_with("HEFI2019")) %>% 
+  dplyr::rename(t1=p) %>% 
+  dplyr::right_join(.,surv_contrasts_p50) %>% 
+  dplyr::mutate(t1t0_diff=HEFI2019_TOTAL_SCORE-ref)
+
+# Outcome risk ratio and difference separately for easier extraction in text
+surv_RD50 <-
+  surv_contrasts_p50 %>% 
+  dplyr::filter(type=="RD")
+
+surv_RR50 <-
+  surv_contrasts_p50 %>% 
+  dplyr::filter(type=="RR")
+
+# *********************************************************************** #
+#        Combine survival estimate with survival difference/ratio         #
+# *********************************************************************** #
+
+#  Output p(outcome), labels
+pOutcome_data <- 
+survivalcurve_all %>% 
+  # End of follow-up only
+  dplyr::filter(time_to_primary==max(survivalcurve_all$time_to_primary)) %>% 
+  dplyr::select(p,HEFI2019_TOTAL_SCORE,estimate,lcl95,ucl95,ref) %>% 
+  dplyr::mutate(
+    ## `count the dead` instead of living, i.e., use Pr(1-Survival)
+    across(c(estimate,lcl95,ucl95),
+           ~ (1-.x)*100),
+    p_ci = paste0(scales::number(estimate,0.001), " (",make95ci(.,rounding=0.001),")")
+  )
+
+# merge p(outcome) data with contrasts
+tempdata <-
+  surv_contrasts_p50 %>% 
+  dplyr::select(t1,estimate,lcl95,ucl95,type) %>% 
+  tidyr::pivot_wider(.,values_from = c(estimate,lcl95,ucl95),names_from = type) %>% 
+  dplyr::rename(p=t1)
+
+pOutcome_n_contrast_data <- 
+  pOutcome_data %>% 
+  dplyr::select(-c(lcl95,ucl95)) %>% 
+  dplyr::rename(risk=estimate) %>% 
+  dplyr::full_join(.,tempdata) %>% 
+  dplyr::mutate(
+    # create `intervention label`
+    intervention = case_when(
+      HEFI2019_TOTAL_SCORE < survival_ref ~ paste("-",abs(HEFI2019_TOTAL_SCORE-ref),"pts"),
+      HEFI2019_TOTAL_SCORE > survival_ref ~ paste("+",abs(HEFI2019_TOTAL_SCORE-ref),"pts"),
+      HEFI2019_TOTAL_SCORE == survival_ref ~ "0 pts (reference)"
+    ) ,
+    # make combined estimate for RR and RD, reverse 95ci ordering for increased risks
+    RR_ci = dplyr::case_when(
+       HEFI2019_TOTAL_SCORE < survival_ref ~ paste0(scales::number(estimate_RR,0.01),
+                                                   " (",
+                                                   scales::number(ucl95_RR,0.01),
+                                                   ", ",
+                                                   scales::number(lcl95_RR,0.01),
+                                                    ")"),
+       HEFI2019_TOTAL_SCORE > survival_ref ~ paste0(scales::number(estimate_RR,0.01),
+                                                   " (",
+                                                   scales::number(lcl95_RR,0.01),
+                                                   ", ",
+                                                   scales::number(ucl95_RR,0.01),
+                                                    ")"),       
+    ),
+    RD_ci = dplyr::case_when(
+       HEFI2019_TOTAL_SCORE < survival_ref ~ paste0(scales::number(estimate_RD,0.01),
+                                                   " (",
+                                                   scales::number(ucl95_RD,0.01),
+                                                   ", ",
+                                                   scales::number(lcl95_RD,0.01),
+                                                    ")"),
+       HEFI2019_TOTAL_SCORE > survival_ref ~ paste0(scales::number(estimate_RD,0.01),
+                                                   " (",
+                                                   scales::number(lcl95_RD,0.01),
+                                                   ", ",
+                                                   scales::number(ucl95_RD,0.01),
+                                                    ")"),       
+    )
+  ) %>% 
+  # show increase first
+  dplyr::arrange(desc(p))
+
+rm(tempdata)
+
+
+```
+
+**Figure** \@ref(fig:surv-all-plot) presents the survival (CVD-free) probability curves across prespecified percentiles of total HEFI-2019 score. **Table 2** presents the corresponding risk estimates. In this causal inference analysis emulating hypothetical dietary changes, the reference CVD survival (probability of remaining CVD-free) and risks correspond to the scenario where there is no change in the HEFI-2019 score, i.e., at the median (`r survivalcurve_all[survivalcurve_all$p==t0,]$HEFI2019_TOTAL_SCORE[1]` points) of the score distribution. The other CVD survival curves and corresponding risks reflect hypothetical scenarios where all participants achieve predetermined HEFI-2019 score percentiles at baseline. For example, in a hypothetical intervention where all participants achieved a HEFI-2019 score equivalent to the 90^th^ percentile of the distribution (i.e., `r surv_RR50[surv_RR50$t1==90,]$HEFI2019_TOTAL_SCORE` points, an increase of `r surv_RR50[surv_RR50$t1==90,]$t1t0_diff` points from the median score), the `r floor(max(survivalcurve_all$time_to_primary)/12)`-year relative risk (RR) of CVD would decrease by `r round((1-surv_RR50[surv_RR50$t1==90,]$estimate)*100)`% (RR, `r round(surv_RR50[surv_RR50$t1==90,]$estimate,2)`; 95%CI: `r make95ci(surv_RR50[surv_RR50$t1==90,])`; Table 2). Inversely, in an undesirable scenario where all participants ended up with a HEFI-2019 score corresponding to the 10^th^ percentile (i.e., `r surv_RR50[surv_RR50$t1==10,]$HEFI2019_TOTAL_SCORE` points, a decrease of `r abs(surv_RR50[surv_RR50$t1==10,]$t1t0_diff)` points from the median score), the `r floor(max(survivalcurve_all$time_to_primary)/12)`-year RR of CVD would increase by `r round(abs(1-surv_RR50[surv_RR50$t1==10,]$estimate)*100)`% (RR, `r round(surv_RR50[surv_RR50$t1==10,]$estimate,2)`; 95%CI: `r make95ci(surv_RR50[surv_RR50$t1==10,],reverse=1)`; Table 2).  
+
+\newpage
+
+```{r surv-all-plot, fig.height=6, fig.width=7.5,fig.cap="Probability of remaining CVD-free (survival curves) at varying predetermined HEFI-2019 score percentiles acheived in adults from the UK Biobank (n=133,168). The probability of remaining CVD-free at the median HEFI-2019 score is the mean probability and hence is the reference survival curve in a hypothetical scenario where there is no change in the HEFI-2019 in this population. Other curves reflect the probability of remaining CVD-free under hypothetical scenarios where all participants would achieve a HEFI-2019 score corresponding to predetermined percentiles in this population. Estimates of survival probability are based on a fully adjusted Cox regression model using inverse probability weighting for exposure and death-censoring (see methods for detail). The HEFI-2019 score is based on usual dietary intakes modelled using the National Cancer Institute multivariate algorithm (see Methods). The total HEFI-2019 score was modelled using a restricted cubic spline with 4 knots. CVD, cardiovascular disease; HEFI-2019, Healthy Eating Food Index-2019."}
+
+# *********************************************************************** #
+#      Output survival curve using the <survivalcurveplot> function       #
+# *********************************************************************** #
+
+  # Of note the function survivalcuveplot is located in set-up chunk
+    
+  survallplot <-
+    survivalcurve_all %>% 
+    survivalcurveplot(indata=.)
+
+
+# ********************************************** #
+#                  Print curves                  #
+# ********************************************** #
+
+survallplot
+
+# ********************************************** #
+#                  Save figure                   #
+# ********************************************** #
+
+  ggplot2::ggsave(file.path(manuscript_dir,"Fig3_survival.pdf"),
+        plot=survallplot, dpi=300, width=7.5,height=6, units="in",scale=1,device = cairo_pdf)
+
+  ggplot2::ggsave(file.path(manuscript_dir,"Fig3_survival.png"),
+         plot=survallplot, dpi=300, width=7.5,height=6, units="in",scale=1)
+
+```
+
+\newpage
+
+```{r table2-risks-all}
+
+# *********************************************************************** #
+#            Output survival estimate/difference/ratio table              #
+# *********************************************************************** #
+
+  ## note: pOutcome_n_contrast_data data created in chunk <surv-all-data>
+
+pOutcome_n_contrast_tab <-
+  pOutcome_n_contrast_data %>% 
+  dplyr::mutate(# rescale percentage
+                  risk=risk/100 ) %>% 
+  dplyr::select(-c(starts_with("estimate"),starts_with("lcl"),starts_with("ucl"))) %>% 
+  gt::gt(.) %>% 
+    gt::cols_hide(c(ref,p_ci)) %>% 
+    gt::cols_move_to_start(c(p,HEFI2019_TOTAL_SCORE,intervention)) %>% 
+    gt::tab_spanner(
+      label = md("**Total HEFI-2019**"),
+      columns =c (p,HEFI2019_TOTAL_SCORE,intervention)
+    ) %>% 
+    gt::tab_spanner(
+      label = md("**Difference in risk estimates (95%CI)**"),
+      columns =c (RD_ci, RR_ci)
+    ) %>% 
+   gt::cols_label(
+     p="Percentile",
+     intervention = "Hypothetical change",
+     HEFI2019_TOTAL_SCORE = "Score (/80)",
+     risk = md(paste0("**",round(max(survivalcurve_all$time_to_primary)/12),"-year CVD risk**")),
+     RR_ci = "Relative",
+     RD_ci = "Absolute, % point"
+   ) %>%
+  gt::fmt_percent(
+    columns=risk,
+    decimals=1
+  ) %>% 
+  gt::sub_missing(
+    columns=c(RR_ci),
+    missing_text="1 (reference)"
+  ) %>%
+  gt::sub_missing(
+    columns=c(RD_ci),
+    missing_text="0 (reference)"
+  ) %>% 
+  gt::tab_header(
+    title = md(paste0("**Table 2.** Estimated risks of CVD under hypothetical scenarios where all eligible participants in the UK Biobank (n=",eligible_uncensored_n,") achieve predetermined percentiles of the total HEFI-2019 score at baseline"))) %>% 
+    gt::tab_footnote(
+    footnote = paste("Difference in risk estimates reflect risks, had all participants in the sample achieved a prespecified HEFI-2019 score percentile, compared with the risk at the median HEFI-2019 score among all participants, the reference scenario where there is no change in HEFI-2019 (i.e., `0 pts`). Estimates are based on a fully adjusted Cox regression model using inverse probability weighting (IPW) for dietary exposure and death-censoring. The inverse probability weighting model covariates were",knitr::combine_words(tolower(covar_list)[1:length(covar_list)-1]),". Energy intake was included as a covariate in the Cox regression model. The 95%CI were estimated using 250 bootstrap samples. CVD, cardiovascular disease; HEFI-2019, Healthy Eating Food Index-2019."),
+    locations =  cells_title("title"))  %>% 
+  gt::tab_footnote(
+  footnote = "The HEFI-2019 score is based on usual dietary intakes modelled using the National Cancer Institute multivariate algorithm (see Methods). The HEFI-2019 score was modelled using a restricted cubic spline with 4 knots.",
+  locations = cells_column_spanners(spanners="**Total HEFI-2019**") 
+    ) %>% 
+    gtstyle(.)
+
+# *********************************************************************** #
+#  Use <gtsave_select> function to print table directly or save as png    #
+# *********************************************************************** #
+  
+gtsave_select(pOutcome_n_contrast_tab,"Table 2",OUTPUT_WORD)  
+
+
+```
+
+\newpage
+
+```{r hrcurve, fig.height=6, fig.width=7, fig.cap="Hazard ratio curve of CVD (top panel) along the total HEFI-2019 score distribution (lower panel) in adults from the UK Biobank (n=132,777). The reference solid line (hazard ratio=1.0 in the top panel) corresponds to the median HEFI-2019 total score in this population. The hazard ratio curve is based on a fully-adjusted Cox regression model using inverse probability weighting for exposure and censoring. The HEFI-2019 score is based on usual dietary intakes modelled using the National Cancer Institute multivariate algorithm (see Methods). The total HEFI-2019 score was modelled using a restricted cubic spline with 4 knots. The plot was restricted to percentiles 1 to 99 of the total HEFI-2019 score to avoid extrapolation of hazards beyond observed scores (i.e., 22.7 to 64.9 points). The 95%CI were estimated using 250 bootstrap samples. CVD, cardiovascular disease; HEFI-2019, Healthy Eating Food Index-2019; /80, maximum score possible for the HEFI-2019."}
+
+# *********************************************************************** #
+#                Import data for hazard ratio curve plot                  #
+# *********************************************************************** #
+
+## import distrib data (all)
+  mcmc_tot <-
+  haven::read_sas(file.path(nci_mcmc_distrib_dir,"distribtotal_t0.sas7bdat"))
+
+## import hr curve data
+ hrcurve <- 
+    haven::read_sas(file.path(nci_mcmc_model_dir,"curvef.sas7bdat"))
+
+# *********************************************************************** #
+#            Output hazard ratio curve with distribution plot             #
+# *********************************************************************** #
+ 
+hrcurve_plot <- 
+  ggplot2::ggplot(data=hrcurve,aes(x=HEFI2019_TOTAL_SCORE,y=estimate)) +
+  ggplot2::geom_line(size=0.75) +
+  ggplot2::geom_line(aes(y=lcl95),linetype="longdash",size=0.75) +
+  ggplot2::geom_line(aes(y=ucl95),linetype="longdash",size=0.75) +
+  ggplot2::geom_hline(yintercept = 1, color="gray") +
+  ggplot2::scale_x_continuous(breaks=(seq(20,70,by=10))) +
+  ggplot2::scale_y_continuous(trans="log10",breaks=(seq(0,2.3,by=0.25))) +
+  ggplot2::coord_cartesian(xlim = c(20,70)) +
+  ggplot2::labs(x="Total HEFI-2019 score (/80), points",y="Hazard ratio of incident CVD") +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    panel.grid.minor.y = element_blank() 
+  )
+
+# ********************************************** #
+#         Distribution of hefi19 scores          #
+# ********************************************** #
+
+ distribtot_plot <- 
+   mcmc_tot %>% 
+   ggplot(aes(x=HEFI2019_TOTAL_SCORE),stat="identity") +
+   ggplot2::geom_histogram(binwidth = 2.5, aes(y=..density..), colour="black",fill="white") +
+   ggplot2::geom_density(kernel="gaussian",fill="black",alpha=0.1) +
+   ggplot2::theme_bw() +
+   ggplot2::theme(
+     panel.grid.major.y = element_blank() ,
+     panel.grid.minor.y = element_blank() ) +
+   ggplot2::scale_x_continuous(breaks=(seq(20,70,by=10))) +
+   ggplot2::coord_cartesian(xlim = c(20,70)) + 
+   ggplot2::labs(x="Total HEFI-2019 score (/80), points",y="Density")
+
+# ********************************************** #
+#      Combine both plots with <patchwork>       #
+# ********************************************** #
+ 
+  hrcurve_n_distrib_plot <-
+  ( (hrcurve_plot+
+       ggplot2::labs(x=NULL) +
+       ggplot2::theme(axis.text.x = element_blank(),
+                      panel.grid.minor.y=element_blank())
+     ) / distribtot_plot)
+
+ hrcurve_n_distrib_plotf <- 
+   hrcurve_n_distrib_plot + 
+   plot_layout(height=c(0.66,0.34),guides="collect") 
+ 
+# ********************************************** #
+#                  Print curve                   #
+# ********************************************** #
+
+hrcurve_n_distrib_plotf
+
+# ********************************************** #
+#                  Save figure                   #
+# ********************************************** #
+
+  ggplot2::ggsave(file.path(manuscript_dir,"Fig4_hrcurve.pdf"),
+        plot=hrcurve_n_distrib_plotf, dpi=300, width=7,height=6, units="in",scale=1,device = cairo_pdf)
+
+  ggplot2::ggsave(file.path(manuscript_dir,"Fig4_hrcurve.png"),
+         plot=hrcurve_n_distrib_plotf, dpi=300, width=7,height=6, units="in",scale=1)
+ 
+ 
+ 
+```
+
+\newpage
+
+## Sensitivity analyses
+
+```{r surv-bysex-data}
+
+# *********************************************************************** #
+#           Import data on sample size and crude nb of events             #
+# *********************************************************************** #
+
+# Crude events proportion
+crudeEvent_bysex <- 
+  haven::read_sas(file.path(results_dir,"event_tsex.sas7bdat")) %>% 
+  dplyr::rename(males=sexmeno_4)
+
+  ## output descriptive statistics
+  n_males <- sum(crudeEvent_bysex[crudeEvent_bysex$males==1,]$COUNT)
+  n_females <- sum(crudeEvent_bysex[crudeEvent_bysex$males==0,]$COUNT)
+  crudeEvent_bysex <- crudeEvent_bysex %>% filter(event_primary==1)
+  
+# *********************************************************************** #
+#     Prepare data for survival difference/ratio at given percentile      #
+# *********************************************************************** #
+# define percentile of t0
+  ref_perc <- 50
+
+# import sas7bdat 
+  
+## output contrasts of survival curve
+surv_contrasts_p50_sex <- 
+  haven::read_sas(file.path(nci_mcmc_model_dir,"survivalcontrast_sex_lrf.sas7bdat")) %>%
+  dplyr::filter(type!="P(outcome)") %>% 
+  # keep only contrasts, at full time to follow-up
+  dplyr::filter(time_to_primary==135 & strata=="males" | time_to_primary==137 & strata=="females" ) %>% ### hardcoded max time (135 for males, 137 for females)
+  # keep only contrasts with `t0` as reference, i.e., p50
+  dplyr::slice(grep(paste0("_p",ref_perc),name)) %>% 
+  dplyr::select(-c(p,type)) %>% 
+  # split t0 and t1 for easier call
+  tidyr::separate(name,into=c("type","t1","t0"),sep='_') %>% 
+  # change to num
+  dplyr::mutate(
+    t0=as.numeric(gsub('p','',t0)),
+    t1=as.numeric(gsub('p','',t1)),
+    ## reverse comparison for contrasts below p50
+    across(c(estimate,lcl95,ucl95),
+       ~ ifelse(t0<ref_perc,
+                ifelse(type=="RD",-.x,1/.x)
+                ,.x)
+      ),
+    t1b=ifelse(t0<ref_perc,t0,t1),
+    t0b=ifelse(t0<ref_perc,t1,t0)
+  ) %>% 
+  dplyr::select(-c(t0,t1,estimate_ci,estimate_se,`_ci`,`_se`,alpha,one_minus_half_alpha)) %>% 
+  dplyr::rename(t0=t0b,t1=t1b)
+
+# combine label of survival curves with contrasts
+  ## import survival curve for all to get reference level
+  hefi2019_exposure <- 
+    haven::read_sas(file.path(nci_mcmc_model_dir,"survivalplotsexf.sas7bdat")) %>% 
+    dplyr::select(p,starts_with("HEFI2019")) %>% 
+    dplyr::distinct(HEFI2019_TOTAL_SCORE,.keep_all = TRUE) %>% 
+    dplyr::rename(t1=p)
+
+surv_contrasts_p50_sex <- 
+  surv_contrasts_p50_sex %>% 
+  dplyr::left_join(.,hefi2019_exposure) %>% 
+  dplyr::mutate(
+    ref = hefi2019_exposure[hefi2019_exposure$t1==ref_perc,]$HEFI2019_TOTAL_SCORE,
+    t1t0_diff=HEFI2019_TOTAL_SCORE-ref
+    ) %>% 
+  dplyr::select(-c(tvalue,cv))
+
+surv_RD50_sex <-
+  surv_contrasts_p50_sex %>% 
+  dplyr::filter(type=="RD")
+
+surv_RR50_sex <-
+  surv_contrasts_p50_sex %>% 
+  dplyr::filter(type=="RR")
+
+
+# *********************************************************************** #
+#        Combine survival estimate with survival difference/ratio         #
+# *********************************************************************** #
+
+#  Output p(outcome), labels
+pOutcome_data_bysex <- 
+  haven::read_sas(file.path(nci_mcmc_model_dir,"survivalplotsexf.sas7bdat")) %>%
+  dplyr::filter((time_to_primary==135 & strata=="males") | (time_to_primary==137 & strata=="females") ) %>% ### note: hardcoded max. time (135 for males, 137 for females)
+  dplyr::select(strata,p,HEFI2019_TOTAL_SCORE,estimate,lcl95,ucl95) %>% 
+  dplyr::mutate(
+    ## add reference score
+    ## `count the dead` instead of living
+    across(c(estimate,lcl95,ucl95),
+           ~ (1-.x)*100),
+    p_ci = paste0(scales::number(estimate,0.001), " (",make95ci(.,rounding=0.001),")"),
+    ref = hefi2019_exposure[hefi2019_exposure$t1==ref_perc,]$HEFI2019_TOTAL_SCORE
+  )
+
+# merge p(outcome) data with contrasts
+tempdata <-
+  surv_contrasts_p50_sex %>% 
+  dplyr::select(strata,t1,estimate,lcl95,ucl95,type) %>% 
+  tidyr::pivot_wider(.,values_from = c(estimate,lcl95,ucl95),names_from = type) %>% 
+  dplyr::rename(p=t1)
+
+pOutcome_n_contrast_data_bysex <- 
+  pOutcome_data_bysex %>% 
+  dplyr::select(-c(lcl95,ucl95)) %>% 
+  dplyr::rename(risk=estimate,survival_ref=ref) %>% 
+  dplyr::full_join(.,tempdata) %>% 
+  dplyr::mutate(
+    # create `intervention label`
+    intervention = case_when(
+      HEFI2019_TOTAL_SCORE < survival_ref ~ paste("-",abs(HEFI2019_TOTAL_SCORE-survival_ref),"pts"),
+      HEFI2019_TOTAL_SCORE > survival_ref ~ paste("+",abs(HEFI2019_TOTAL_SCORE-survival_ref),"pts"),
+      HEFI2019_TOTAL_SCORE == survival_ref ~ "0 pts (reference)"
+    ),
+    # make combined estimate for RR and RD, reverse 95ci ordering for increased risks
+    RR_ci = case_when(
+       HEFI2019_TOTAL_SCORE < survival_ref ~ paste0(scales::number(estimate_RR,0.01),
+                                                   " (",
+                                                   scales::number(ucl95_RR,0.01),
+                                                   ", ",
+                                                   scales::number(lcl95_RR,0.01),
+                                                    ")"),
+       HEFI2019_TOTAL_SCORE > survival_ref ~ paste0(scales::number(estimate_RR,0.01),
+                                                   " (",
+                                                   scales::number(lcl95_RR,0.01),
+                                                   ", ",
+                                                   scales::number(ucl95_RR,0.01),
+                                                    ")"),       
+    ),
+    RD_ci = case_when(
+       HEFI2019_TOTAL_SCORE < survival_ref ~ paste0(scales::number(estimate_RD,0.01),
+                                                   " (",
+                                                   scales::number(ucl95_RD,0.01),
+                                                   ", ",
+                                                   scales::number(lcl95_RD,0.01),
+                                                    ")"),
+       HEFI2019_TOTAL_SCORE > survival_ref ~ paste0(scales::number(estimate_RD,0.01),
+                                                   " (",
+                                                   scales::number(lcl95_RD,0.01),
+                                                   ", ",
+                                                   scales::number(ucl95_RD,0.01),
+                                                    ")"),       
+    )
+  ) %>% 
+  # show increase first
+  dplyr::arrange(strata,desc(p))
+
+rm(tempdata)
+
+# *********************************************************************** #
+#                Hypothesis tests for effect modification                 #
+# *********************************************************************** #
+
+# What is the pvalue for interaction between sex and hefi-2019 ? 
+  ## Methodology described in (Bland & Altman BMJ 2003)
+
+  bysex_int <- 
+  surv_RR50_sex %>% 
+    ## select estimate and se
+    dplyr::select(strata,estimate,se,t1) %>% 
+    tidyr::pivot_wider(values_from = c(estimate,se),names_from=c(strata)) %>% 
+    dplyr::mutate(
+      ## calculate log (estimate)
+      lestimate_males = log(estimate_males),
+      lestimate_females = log(estimate_females),
+      ## calculate difference, StdErr of difference
+      d = lestimate_males - lestimate_females ,
+      se = sqrt(se_males**2 + se_females**2 ) ,
+      t_quant = surv_RR50_sex[1,]$t_quant ,
+      d_lcl = d - (t_quant * se) , 
+      d_ucl = d + (t_quant * se) ,
+      ## calculate tvalue and estimate pvalue
+      tvalue = d / se ,
+      pvalue = pt(abs(tvalue),               # tvalue = critical value of the interaction test
+                  surv_RR50_sex[1,]$nboot-2, # DF = nboot-2
+                  lower.tail = FALSE)*2,     # two-tailed test (absolute value, *2)
+      #zvalue = (1-pnorm(q=(d / se), lower.tail=FALSE))*2
+      ## exponentiation of differences
+      d_exp = exp(d),
+      d_lcl_exp = exp(d_lcl) ,
+      d_ucl_exp = exp(d_ucl) ,
+      pvalue_fmt = scales::pvalue(pvalue,add_p = FALSE, accuracy = 0.01)
+    ) %>% 
+    dplyr::select(t1,pvalue,pvalue_fmt,d_exp,d_lcl_exp,d_ucl_exp)
+
+
+
+```
+
+The total HEFI-2019 score was inversely associated with hazards of CVD across its distribution (**Figure** \@ref(fig:hrcurve)), consistent with the differences in risk estimates presented above in the causal inference analysis. There is no evidence that the RR of CVD according to hypothetical changes in HEFI-2019 is modified by sex (**Table 3**). CVD hazards at varying length of follow-up were generally consistent over time (**Supplementary Table 12**). CVD survival curves and risks based on a fully parametric modeling of the time to CVD were similar to the survival curves based on the Cox regression models (**Supplementary Figure 3**, **Supplementary Table 13**).
+
+```{r table3-risks-bysex}
+
+# outcome table of p(outcome), RR and RD | HEFI at varying level
+  
+  ## note: data (eg, pOutcome_n_contrast_data) were created in chunk <surv-bysex-data>
+
+# *********************************************************************** #
+#            Output survival estimate/difference/ratio table              #
+# *********************************************************************** #
+
+pOutcome_n_contrast_tab_bysex <-
+  # Format p-interaction data to make it consistent (calculated in <survbysex>)
+  bysex_int[,c("t1","pvalue")] %>% 
+  dplyr::mutate(strata="males", # indicate one strata so p-interaction appears only once
+                pvalue_fmt = scales::pvalue(pvalue,accuracy=0.01,add_p=TRUE) # format pvalues
+                ) %>%
+  dplyr::rename(p=t1) %>% 
+  # merge p-int with <pOutcome_n_contrast_data_bysex> data
+  dplyr::right_join(.,pOutcome_n_contrast_data_bysex) %>% 
+  # rescale percentage
+  dplyr::mutate(risk=risk/100,
+                strata_label=case_when(
+                  strata == "females" ~ paste0("Females, n=",scales::number(n_females,big.mark=",")),
+                  strata == "males" ~ paste0("Males, n=",scales::number(n_males,big.mark = ","))
+                )) %>% 
+  dplyr::select(-c(starts_with("estimate"),starts_with("lcl"),starts_with("ucl"))) %>% 
+  dplyr::group_by(strata_label) %>% 
+  dplyr::arrange(strata,desc(p)) %>% # ensure ordering
+  gt::gt(.) %>% 
+    gt::cols_hide(c(survival_ref,p_ci,strata,pvalue)) %>% 
+    gt::cols_move_to_end(pvalue_fmt) %>% 
+    gt::tab_spanner(
+      label = md("**Total HEFI-2019**"),
+      columns =c (p,HEFI2019_TOTAL_SCORE,intervention)
+    ) %>% 
+    gt::tab_spanner(
+      label = md("**Difference in risk estimates (95%CI)**"),
+      columns =c (RD_ci, RR_ci)
+    ) %>% 
+   gt::cols_label(
+     p="Percentile",
+     intervention = "Hypothetical change",
+     HEFI2019_TOTAL_SCORE = "Score (/80)",
+     risk = md(paste0("**",round(max(max(surv_contrasts_p50_sex$time_to_primary))/12),"-year CVD risk**")),
+     RD_ci = "Absolute, % point",
+     RR_ci = "Relative" ,
+     pvalue_fmt = md("**P-interaction**")
+   ) %>%
+  gt::fmt_percent(
+    columns=risk,
+    decimals=1
+  ) %>% 
+  gt::sub_missing(
+    columns=c(RR_ci),
+    missing_text="1 (reference)"
+  ) %>%
+  gt::sub_missing(
+    columns=c(RD_ci),
+    missing_text="0 (reference)"
+  ) %>% 
+  gt::sub_missing(
+    columns=c(pvalue_fmt),
+    missing_text="-"
+  )   %>% 
+  gt::tab_header(
+    title = md(paste0("**Table 3.** Estimated risks of CVD in hypothetical scenarios where all eligible participants in the UK Biobank (n=",eligible_uncensored_n,") achieve predetermined percentiles of the total HEFI-2019 score at baseline, by sex"))) %>% 
+    gt::tab_footnote(
+    footnote = paste("Risk difference estimates reflect risks, had all participants in the sample achieved a HEFI-2019 score corresponding to the score indicated, compared with the HEFI-2019 all participants actually had on average (i.e., `no dietary change`). Estimates are based on fully adjusted pooled logistic regression models using inverse probability weighting for dietary exposure and death-censoring and stratified by sex. In the pooled logistic regression model, the time to CVD was modelled using a restricted cubic spline with 5 knots and an interaction term between the total HEFI-2019 score and time to CVD was included. Total energy intake was also included in the pooled logistic regression model. The inverse probability weighting models were stratified by sex and covariates were",knitr::combine_words(tolower(covar_list[-1])),". The 95%CI were estimated using 250 bootstrap samples. HEFI-2019, Healthy Eating Food Index-2019."),
+    locations =  cells_title("title"))  %>% 
+  gt::tab_footnote(
+  footnote = "The HEFI-2019 score is based on usual dietary intakes modeled using the National Cancer Institute multivariate algorithm (see Methods). Percentile values are not sex-specific, i.e., they reflect the combined distribution of total HEFI-2019 scores of males and females.",
+  locations = cells_column_spanners(spanners="**Total HEFI-2019**") 
+    ) %>% 
+  gt::tab_footnote(
+    footnote = "P-values for interaction (independent  t-test) reflect the compatibility of the relative risk in males compared with the relative risk in females for a given percentile, with the (null) hypothesis that both relative risks are equivalent under this model.",
+    locations = cells_column_labels(columns=pvalue_fmt)
+  ) %>% 
+  gtstyle(.)
+
+# *********************************************************************** #
+#  Use <gtsave_select> function to print table directly or save as png    #
+# *********************************************************************** #
+  
+gtsave_select(pOutcome_n_contrast_tab_bysex,"Table 3",OUTPUT_WORD)  
+
+```
+
+\newpage
+
+# Discussion
+
+```{r discussion-data}
+
+# ********************************************** #
+#       Plausibility of reported E intakes       #
+# ********************************************** #
+
+plausibility_E <- 
+  haven::read_sas(file.path(results_dir,"table1_reporting.sas7bdat"))
+
+plausibility_E_all <- 
+  plausibility_E %>% 
+  dplyr::filter(id==0) # id 0 = overall sample
+
+
+```
+
+The objective of this study was to verify the hypothesis that a greater degree of adherence to the 2019 CFG’s recommendations on healthy food choices, measured with the HEFI-2019, reduces the risk of incident CVD. A causal inference analysis emulating changes in HEFI-2019 scores under hypothetical intervention scenarios among more than 130,000 adult participants of the UK Biobank support this hypothesis. These results provide evidence supporting the legitimacy and usefulness of the 2019 CFG recommendations on healthy food choices to reduce CVD risk at the population level.  
+
+Key CFG’s recommendations on healthy food choices aim at increasing intake of vegetables, fruits, whole grains, plant-based protein foods, water and unsweetened beverages and unsaturated fats, while decreasing the relative proportion of refined grains, sugary drinks, processed meats as well as saturated fats, free sugars, and sodium intakes (4, 5, 7). These recommendations are common to many other dietary guidelines around the world (34) and are also key features of well-established healthy patterns such as the Mediterranean diet (35, 36). Few randomized dietary intervention trials have been conducted to date wherein causality can be documented with more certainty. Among them, the PREDIMED randomized controlled trial has shown that participants randomized to a Mediterranean diet supplemented with either extra-virgin olive oil or mixed nuts had a 30% lower hazard of CVD over a 4.8-year follow-up compared with participants randomized to the control diet (37). More recently, the CORDIOPREV randomized controlled trial confirmed that the Mediterranean diet was superior to the low-fat diet in preventing major cardiovascular events in secondary prevention patients (38). Using observational data, others have examined the relationship between adherence to the Dietary Guidelines for Americans using Healthy Eating Indices (HEI) and incident CVD. Participants with Alternative HEI-2010 and HEI-2015 scores above the fifth quintile, reflecting a greater degree of adherence to the dietary guidelines, had a 24% and 16% lower hazard of incident CVD, respectively, compared with participants whose scores were below the first quintile (39, 40). Another analysis based on multiple cohorts has found consistent reduction in hazards of CVD mortality in participants with higher diet quality (above fifth quintile), as measured with the Alternative HEI-2010, the HEI-2010 score or the alternative Mediterranean diet score (41). Finally, a systematic review and meta-analysis pooling different diet quality scores found a 20% reduced risk (95%CI: 0.78, 0.82) of CVD incidence or mortality with higher diet quality scores (42). Dietary guidelines are crafted and updated regularly to consider the most recent evidence associating a variety of dietary patterns, foods and nutrients to health, with a focus generally on the risk of chronic diseases such as CVD, cancer and type 2 diabetes. Considering the similarities among various sets of dietary guidelines and the rigorous process implemented for their update, it is unsurprising that higher adherence to such guidelines, including those found in the 2019 CFG, has been systematically associated with a reduced risk of CVD.  
+
+A key assumption of causal effect estimation using observational data is that there is no unmeasured confounding (18, 43). However, as shown in the Supplementary Material (p.28), residual (or unmeasured) confounding would have to be relatively important to completely “nullify” the lower RR of CVD at higher HEFI-2019 scores. Moreover, follow-up data collection among all participants was not implemented in the UK Biobank and changes in dietary intakes and potential time-varying confounders such as incident risk factors and change in medication could not be considered. Data from this study must therefore be interpreted as an observational analog of an intention-to-treat effect in which non-adherence to the hypothetical intervention is expected but could not be accounted for. Future studies with repeated data collection including diet will help provide more accurate estimates of how adherence to CFG recommendations influences the risk of CVD by considering non-adherence, i.e., estimating a per-protocol effect (18, 19, 44).  
+
+The differences in the dietary habits between the UK and Canada and related considerations need to be addressed in the larger scope of this work on the HEFI-2019, a Canadian-focused tool. First, the association between specific dietary risk factors such as low intake of vegetables and fruits, low intakes of fibers, high intake of meat, saturated fats or free sugars and cardiovascular outcomes have been observed in diverse populations around the world, including in the UK (34, 45-48). The pathophysiology of diet-related CVD is also unlikely to differ markedly between Canada and the UK. Yet, it is possible that the magnitude of the associations between the dietary risk factors captured by the various HEFI-2019 components and CVD risk varies across different populations. Nevertheless, we are confident that results from this analysis substantiate the relevance of the recommendations on healthy food choices as stated in the CFG-2019 to prevent CVD. Secondly, the extent to which this analysis based in a sample of UK adults under- or over-estimates the actual reduction in CVD risk associated with higher HEFI-2019 scores among Canadian adults also remains uncertain. Thirdly, the external validity of the CVD risk estimates also needs to be interpreted while recognizing that adults from the UK Biobank are generally more health-conscious than other adults in the UK (10). Accordingly, the crude absolute 11-y risk of CVD was very low in this sample (`r round(event_primary$Percent,1)`%). This suggests that absolute CVD risk reduction associated with higher HEFI-2019 score in this eligible sample of the UK Biobank may have been underestimated compared with the risk that would have been observed in a less health-conscious population.  
+
+One of the major strengths of this work relates to the use of a counterfactual framework that addresses causality by deriving realistic HEFI-2019 score contrasts emulating a dietary intervention. A more conventional approach to assessing the CVD hazards associated with variations in the HEFI-2019 score in the study population yielded results that were highly consistent, further supporting the validity of the results from the causal inference analyses. Accounting for random errors in the assessment of the dietary intakes measured with 24-h dietary recalls with the NCI multivariate method is also a key strength of this work. Limitations of this work include the challenge in measuring the dietary habits as the exposure variable as 24-h dietary recalls are known to be affected by systematic errors, although to a lesser extent than other common instruments such as food-frequency questionnaire (49-51). Of note, the extent of potential under-reporting of total energy intakes in the present study (i.e., `r round(plausibility_E_all[1,"Percent"],1)`%) is not greater than what has been reported in other contemporary nutrition survey (52, 53). Finally, unmeasured confounding is a limitation as in most observational studies.  
+
+In conclusion, emulating a large dietary intervention within the UK Biobank provided strong evidence that a greater degree of adherence to CFG’s recommendations on healthy food choices, as measured with the HEFI-2019, reduces the 11-year risk of major CVD in middle-aged and older adults. To best inform future dietary guidelines in Canada, studies and analyses in Canadian cohorts are needed first to confirm these results and second to better ascertain the magnitude of the CVD risk-reduction associated with better diet quality in Canada.
+
+\newpage
+
+# Acknowledgements
+
+**Acknowledgements:** The UK Biobank study was conducted in accordance with the ethical standards of North West Multi-Centre Research Ethics Committee on human experimentation (reference number 06/MRE08/65).  
+
+**Conflict of interest:** Authors have no potential conflicts of interest.  
+
+**Disclosures:** DB was a casual employee of Health Canada (2019-2020), held a doctoral training award from the Fonds de recherche du Québec – Santé (2019-2021) and holds a Canadian Institute of Health Research (CIHR) Fellowship award (MFE-181852). B.J.A. is a consultant for Novartis and Silence Therapeutics and has received research contracts from Pfizer, Ionis Pharmaceuticals and Silence Therapeutics. BL has the following disclosures: he has received funding from the Canadian Institutes for Health Research (on going), the Fonds de recherche du Québec – Santé (FRQS) (on going), Fonds de recherche du Québec – Nature et technologies (NT) (on going), the Ministère de la santé et des services sociaux (MSSS) du Québec (on going), Health Canada (completed in 2021) and Atrium Innovations [completed in 2019]). BL is an Advisory Board member of the Canadian Nutrition Society.  
+
+**Authors’ contributions to the manuscript:**All authors designed the research; DB performed statistical analysis; DB wrote the first draft of the manuscript; all authors gave final approval and critically reviewed the manuscript; BL had primary responsibility for final content.
+
+\newpage
+
+# References
+
+1.	Alam S, Lang JJ, Drucker AM, Gotay C, Kozloff N, Mate K, et al. Assessment of the burden of diseases and injuries attributable to risk factors in Canada from 1990 to 2016: an analysis of the Global Burden of Disease Study. CMAJ Open. 2019;7(1):E140-E8.
+2.	G. B. D. Risk Factors Collaborators. Global burden of 87 risk factors in 204 countries and territories, 1990-2019: a systematic analysis for the Global Burden of Disease Study 2019. Lancet. 2020;396(10258):1223-49.
+3.	Nshimyumukiza L, Lieffers JRL, Ekwaru JP, Ohinmaa A, Veugelers PJ. Temporal changes in diet quality and the associated economic burden in Canada. PLoS One. 2018;13(11):e0206877.
+4.	Health Canada. Canada’s food guide. Ottawa: Health Canada2019.
+5.	Health Canada. Canada’s Dietary Guidelines - for Health Professionals and Policy Makers. 2019.
+6.	Health Canada. Food, Nutrients and Health: Interim Evidence Update 2018 for Health Professionals and Policy Makers. Ottawa: Health Canada2019.
+7.	Brassard D, Elvidge Munene LA, St-Pierre S, Guenther PM, Kirkpatrick SI, Slater J, et al. Development of the Healthy Eating Food Index (HEFI)-2019 measuring adherence to Canada's Food Guide 2019 recommendations on healthy food choices. Appl Physiol Nutr Metab. 2022;47:595-610.
+8.	Brassard D, Elvidge Munene LA, St-Pierre S, Gonzalez A, Guenther PM, Jessri M, et al. Evaluation of the Healthy Eating Food Index (HEFI)-2019 measuring adherence to Canada's Food Guide 2019 recommendations on healthy food choices. Appl Physiol Nutr Metab. 2022;47(5):582-94.
+9.	Sudlow C, Gallacher J, Allen N, Beral V, Burton P, Danesh J, et al. UK biobank: an open access resource for identifying the causes of a wide range of complex diseases of middle and old age. PLoS Med. 2015;12(3):e1001779.
+10.	Fry A, Littlejohns TJ, Sudlow C, Doherty N, Adamska L, Sprosen T, et al. Comparison of Sociodemographic and Health-Related Characteristics of UK Biobank Participants With Those of the General Population. Am J Epidemiol. 2017;186(9):1026-34.
+11.	Liu B, Young H, Crowe FL, Benson VS, Spencer EA, Key TJ, et al. Development and evaluation of the Oxford WebQ, a low-cost, web-based method for assessment of previous 24 h dietary intakes in large-scale prospective studies. Public Health Nutr. 2011;14(11):1998-2005.
+12.	Greenwood DC, Hardie LJ, Frost GS, Alwan NA, Bradbury KE, Carter M, et al. Validation of the Oxford WebQ Online 24-Hour Dietary Questionnaire Using Biomarkers. Am J Epidemiol. 2019;188(10):1858-67.
+13.	Perez-Cornago A, Pollard Z, Young H, van Uden M, Andrews C, Piernas C, et al. Description of the updated nutrition calculation of the Oxford WebQ questionnaire and comparison with the previous version among 207,144 participants in UK Biobank. Eur J Nutr. 2021;60(7):4019-30.
+14.	Brown IJ, Dyer AR, Chan Q, Cogswell ME, Ueshima H, Stamler J, et al. Estimating 24-hour urinary sodium excretion from casual urinary sodium concentrations in Western populations: the INTERSALT study. Am J Epidemiol. 2013;177(11):1180-92.
+15.	Townsend P, Phillimore P, Beattie A. Health and deprivation : Inequality and the north. London, UK: Croom Helm; 1987.
+16.	Kyle RP, Moodie EEM, Klein MB, Abrahamowicz M. Evaluating Flexible Modeling of Continuous Covariates in Inverse-Weighted Estimators. Am J Epidemiol. 2019;188(6):1181-91.
+17.	Harrell FE. General Aspects of Fitting Regression Models.  Regression Modeling Strategies: With Applications to Linear Models, Logistic and Ordinal Regression, and Survival Analysis. Cham: Springer International Publishing; 2015. p. 13-44.
+18.	Chiu YH, Chavarro JE, Dickerman BA, Manson JE, Mukamal KJ, Rexrode KM, et al. Estimating the effect of nutritional interventions using observational data: the American Heart Association's 2020 Dietary Goals and mortality. Am J Clin Nutr. 2021.
+19.	Kutcher SA, Brophy JM, Banack HR, Kaufman JS, Samuel M. Emulating a Randomised Controlled Trial With Observational Data: An Introduction to the Target Trial Framework. Can J Cardiol. 2021;37(9):1365-77.
+20.	Tobias DK, Lajous M. What would the trial be? Emulating randomized dietary intervention trials to estimate causal effects with observational data. Am J Clin Nutr. 2021.
+21.	Thompson FE, Kirkpatrick SI, Subar AF, Reedy J, Schap TE, Wilson MM, et al. The National Cancer Institute's Dietary Assessment Primer: A Resource for Diet Research. J Acad Nutr Diet. 2015;115(12):1986-95.
+22.	Kipnis V, Midthune D, Buckman DW, Dodd KW, Guenther PM, Krebs-Smith SM, et al. Modeling data with excess zeros and measurement error: application to evaluating relationships between episodically consumed foods and health outcomes. Biometrics. 2009;65(4):1003-10.
+23.	Brakenhoff TB, van Smeden M, Visseren FLJ, Groenwold RHH. Random measurement error: Why worry? An example of cardiovascular risk factors. PLoS One. 2018;13(2):e0192298.
+24.	Zhang S, Midthune D, Guenther PM, Krebs-Smith SM, Kipnis V, Dodd KW, et al. A New Multivariate Measurement Error Model with Zero-Inflated Dietary Data, and Its Application to Dietary Assessment. Ann Appl Stat. 2011;5(2B):1456-87.
+25.	Kirkpatrick SI, Guenther PM, Subar AF, Krebs-Smith SM, Herrick KA, Freedman LS, et al. Using short-term dietary intake data to address research questions related to usual dietary intake among populations and subpopulations: Assumptions, statistical techniques, and considerations. J Acad Nutr Diet. 2022.
+26.	Desquilbet L, Mariotti F. Dose‐response analyses using restricted cubic spline functions in public health research. Statistics in Medicine. 2010;29(9):1037-57.
+27.	Naimi AI, Moodie EE, Auger N, Kaufman JS. Constructing inverse probability weights for continuous exposures: a comparison of methods. Epidemiology. 2014;25(2):292-9.
+28.	Cole SR, Hernan MA. Constructing inverse probability weights for marginal structural models. Am J Epidemiol. 2008;168(6):656-64.
+29.	Young JG, Stensrud MJ, Tchetgen Tchetgen EJ, Hernan MA. A causal framework for classical statistical estimands in failure-time settings with competing events. Stat Med. 2020;39(8):1199-236.
+30.	Cole SR, Hernan MA. Adjusted survival curves with inverse probability weights. Comput Methods Programs Biomed. 2004;75(1):45-9.
+31.	Austin PC. Variance estimation when using inverse probability of treatment weighting (IPTW) with survival analysis. Stat Med. 2016;35(30):5642-55.
+32.	Stensrud MJ, Hernan MA. Why Test for Proportional Hazards? JAMA. 2020;323(14):1401-2.
+33.	VanderWeele TJ, Ding P. Sensitivity Analysis in Observational Research: Introducing the E-Value. Ann Intern Med. 2017;167(4):268-74.
+34.	Kebbe M, Gao M, Perez-Cornago A, Jebb SA, Piernas C. Adherence to international dietary recommendations in association with all-cause mortality and fatal and non-fatal cardiovascular disease risk: a prospective analysis of UK Biobank participants. BMC Med. 2021;19(1):134.
+35.	Millen BE, Abrams S, Adams-Campbell L, Anderson CA, Brenna JT, Campbell WW, et al. The 2015 dietary guidelines advisory committee scientific report: development and major conclusions. Adv Nutr. 2016;7(3):438-44.
+36.	Lloyd-Jones DM, Hong Y, Labarthe D, Mozaffarian D, Appel LJ, Van Horn L, et al. Defining and setting national goals for cardiovascular health promotion and disease reduction: the American Heart Association's strategic Impact Goal through 2020 and beyond. Circulation. 2010;121(4):586-613.
+37.	Estruch R, Ros E, Salas-Salvado J, Covas MI, Corella D, Aros F, et al. Primary Prevention of Cardiovascular Disease with a Mediterranean Diet Supplemented with Extra-Virgin Olive Oil or Nuts. N Engl J Med. 2018;378(25):e34.
+38.	Delgado-Lista J, Alcala-Diaz JF, Torres-Pena JD, Quintana-Navarro GM, Fuentes F, Garcia-Rios A, et al. Long-term secondary prevention of cardiovascular disease with a Mediterranean diet and a low-fat diet (CORDIOPREV): a randomised controlled trial. Lancet. 2022;399(10338):1876-85.
+39.	Hu EA, Steffen LM, Coresh J, Appel LJ, Rebholz CM. Adherence to the Healthy Eating Index-2015 and Other Dietary Patterns May Reduce Risk of Cardiovascular Disease, Cardiovascular Mortality, and All-Cause Mortality. J Nutr. 2020;150(2):312-21.
+40.	Chiuve SE, Fung TT, Rimm EB, Hu FB, McCullough ML, Wang M, et al. Alternative dietary indices both strongly predict risk of chronic disease. J Nutr. 2012;142(6):1009-18.
+41.	Liese AD, Krebs-Smith SM, Subar AF, George SM, Harmon BE, Neuhouser ML, et al. The Dietary Patterns Methods Project: synthesis of findings across cohorts and relevance to dietary guidance. J Nutr. 2015;145(3):393-402.
+42.	Morze J, Danielewicz A, Hoffmann G, Schwingshackl L. Diet Quality as Assessed by the Healthy Eating Index, Alternate Healthy Eating Index, Dietary Approaches to Stop Hypertension Score, and Health Outcomes: A Second Update of a Systematic Review and Meta-Analysis of Cohort Studies. J Acad Nutr Diet. 2020;120(12):1998-2031 e15.
+43.	Hernán MA, Robins JM. Causal Inference: What If: CRC Boca Raton: Chapman & Hall/CRC.; 2020. 312 p.
+44.	Hernan MA, Robins JM. Using Big Data to Emulate a Target Trial When a Randomized Trial Is Not Available. Am J Epidemiol. 2016;183(8):758-64.
+45.	Papier K, Fensom GK, Knuppel A, Appleby PN, Tong TYN, Schmidt JA, et al. Meat consumption and risk of 25 common conditions: outcome-wide analyses in 475,000 men and women in the UK Biobank study. BMC Med. 2021;19(1):53.
+46.	Wang M, Ma H, Song Q, Zhou T, Hu Y, Heianza Y, et al. Red meat consumption and all-cause and cardiovascular mortality: results from the UK Biobank study. Eur J Nutr. 2022;61(5):2543-53.
+47.	Kelly RK, Watling CZ, Tong TYN, Piernas C, Carter JL, Papier K, et al. Associations Between Macronutrients From Different Dietary Sources and Serum Lipids in 24 639 UK Biobank Study Participants. Arterioscler Thromb Vasc Biol. 2021;41(7):2190-200.
+48.	Brayner B, Keske MA, Kaur G, Islam SMS, Perez-Cornago A, Piernas C, et al. Longitudinal Associations Between Fat-Derived Dietary Patterns and Early Markers of Cardiovascular Disease Risk in the UK Biobank Study. J Am Heart Assoc. 2022;11(11):e024069.
+49.	Freedman LS, Commins JM, Moler JE, Willett W, Tinker LF, Subar AF, et al. Pooled results from 5 validation studies of dietary self-report instruments using recovery biomarkers for potassium and sodium intake. Am J Epidemiol. 2015;181(7):473-87.
+50.	Freedman LS, Commins JM, Moler JE, Arab L, Baer DJ, Kipnis V, et al. Pooled results from 5 validation studies of dietary self-report instruments using recovery biomarkers for energy and protein intake. Am J Epidemiol. 2014;180(2):172-88.
+51.	Park Y, Dodd KW, Kipnis V, Thompson FE, Potischman N, Schoeller DA, et al. Comparison of self-reported dietary intakes from the Automated Self-Administered 24-h recall, 4-d food records, and food-frequency questionnaires against recovery biomarkers. Am J Clin Nutr. 2018;107(1):80-93.
+52.	Murakami K, Livingstone MB. Prevalence and characteristics of misreporting of energy intake in US adults: NHANES 2003-2012. Br J Nutr. 2015;114(8):1294-303.
+53.	Garriguet D. Accounting for misreporting when comparing energy intake across time in Canada. Health Rep. 2018;29(5):3-12.
+
+\newpage
+
+# Session Info
+
+<details><summary>Expand for details</summary>
+
+```{r sessionInfo, echo = F}
+Sys.time()
+sessionInfo()
+```
+
+</details>
+
+::: {.tocify-extend-page data-unique="tocify-extend-page" style="height: 0;"}
+:::
