@@ -59,6 +59,13 @@ set.seed(12345)
 #             Load required packages             #
 # ********************************************** #
 
+## markdown
+library(knitr)
+library(rmarkdown)
+library(bookdown)
+library(tinytex)
+library(Cairo)
+
 ## data management
 library(haven)
 library(tidyverse)
@@ -67,6 +74,7 @@ library(scales)
 ## results presentation
 library(DiagrammeR)
 library(rsvg)
+library(fmsb)
 library(ggplot2)
 library(patchwork)
 library(gt)
