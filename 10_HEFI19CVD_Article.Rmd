@@ -302,7 +302,7 @@ exposure <-
 
 **Objective:** The aim of this study was to examine how greater adherence to the 2019 CFG’s recommendations on healthy food choices influences the risk of incident CVD.
 
-**Methods**: Participants were a sample of adults without history of CVD, diabetes or cancer from the UK Biobank prospective cohort study. Usual dietary intakes were estimated by modeling data from repeated web-based 24-h dietary recalls using the National Cancer Institute multivariate method. Adherence to key CFG’s recommendations on healthy food choices was assessed using the Healthy Eating Food Index (HEFI)-2019. The CVD outcome was a composite of fatal and non-fatal myocardial infarction and ischemic stroke. Cox regression models adjusted via inverse probability weighting were used to estimate CVD risks. Counterfactual models were used to interpret risks of hypothetical changes in the HEFI-2019 score.
+**Methods**: Participants were a sample of adults without history of CVD, diabetes or cancer from the UK Biobank prospective cohort study. Usual dietary intakes were estimated by modeling data from repeated web-based 24-h dietary recalls using the National Cancer Institute multivariate method. Adherence to key CFG’s recommendations on healthy food choices was assessed using the Healthy Eating Food Index (HEFI)-2019, which has a maximum of 80 points. The CVD outcome was a composite of fatal and non-fatal myocardial infarction and ischemic stroke. Cox regression models adjusted via inverse probability weighting were used to estimate CVD risks. Counterfactual models were used to interpret risks of hypothetical changes in the HEFI-2019 score.
 
 **Results**: A total of `r noquote(flowchart_data[nrow(flowchart_data),]$included)` participants met the eligibility criteria (`r round(n_p_females$Percent)`% females, mean age of `r round(AgeAt24hr$Mean,1)` years, range `r noquote(AgeAt24hr$range)` years). During the `r round(max(surv_RR50$time_to_primary)/12)`-year follow-up, there were `r noquote(event_primary$n_fmt)` cases of incident CVD. Compared with no change in the HEFI-2019 score, increasing the HEFI-2019 score of all participants to the 90^th^ percentile of the score distribution (`r surv_RR50[surv_RR50$t1==90,]$HEFI2019_TOTAL_SCORE` points) would hypothetically reduce the risk of CVD by `r round((1-surv_RR50[surv_RR50$t1==90,]$estimate)*100)`% (relative risk, `r round(surv_RR50[surv_RR50$t1==90,]$estimate,2)`; 95%CI: `r make95ci(x=surv_RR50[surv_RR50$t1==90,])`; absolute risk difference, `r round(surv_RD50[surv_RR50$t1==90,]$estimate,2)`%).
 
@@ -861,7 +861,7 @@ t0 <- 50
 # 0) import all survival curves
   survivalcurve_all <- 
     haven::read_sas(file.path(nci_mcmc_model_dir,"survivalplotf.sas7bdat")) %>% 
-    dplyr::filter(time_to_primary %% 6 == 0 | time_to_primary==max(time_to_primary))
+    dplyr::filter(time_to_primary %% 12 == 0 | time_to_primary==max(time_to_primary))
   
     ## extract median value (the `no dietary change` value)
     survival_ref <-
@@ -943,7 +943,7 @@ surv_RR50 <-
 pOutcome_data <- 
 survivalcurve_all %>% 
   # End of follow-up only
-  dplyr::filter(time_to_primary==max(survivalcurve_all$time_to_primary)) %>% 
+  dplyr::filter(time_to_primary==max(time_to_primary)) %>% 
   dplyr::select(p,HEFI2019_TOTAL_SCORE,estimate,lcl95,ucl95,ref) %>% 
   dplyr::mutate(
     ## `count the dead` instead of living, i.e., use Pr(1-Survival)
@@ -1466,7 +1466,7 @@ pOutcome_n_contrast_tab_bysex <-
   locations = cells_column_spanners(spanners="**Total HEFI-2019**") 
     ) %>% 
   gt::tab_footnote(
-    footnote = "P-values for interaction (independent  t-test) reflect the compatibility of the relative risk in males compared with the relative risk in females for a given percentile, with the (null) hypothesis that both relative risks are equivalent under this model.",
+    footnote = "P-values for interaction (t test) reflect the compatibility of the relative risk in males compared with the relative risk in females for a given percentile, with the (null) hypothesis that both relative risks are equivalent under this model.",
     locations = cells_column_labels(columns=pvalue_fmt)
   ) %>% 
   gtstyle(.)
@@ -1517,7 +1517,7 @@ In conclusion, emulating a large dietary intervention within the UK Biobank prov
 
 **Acknowledgements:** The UK Biobank study was conducted in accordance with the ethical standards of North West Multi-Centre Research Ethics Committee on human experimentation (reference number 06/MRE08/65).  
 
-**Conflict of interest:** Authors have no potential conflicts of interest.  
+**Conflicts of interest:** Authors have no potential conflicts of interest.  
 
 **Disclosures:** DB was a casual employee of Health Canada (2019-2020), held a doctoral training award from the Fonds de recherche du Québec – Santé (2019-2021) and holds a Canadian Institute of Health Research (CIHR) Fellowship award (MFE-181852). B.J.A. is a consultant for Novartis and Silence Therapeutics and has received research contracts from Pfizer, Ionis Pharmaceuticals and Silence Therapeutics. BL has the following disclosures: he has received funding from the Canadian Institutes for Health Research (on going), the Fonds de recherche du Québec – Santé (FRQS) (on going), Fonds de recherche du Québec – Nature et technologies (NT) (on going), the Ministère de la santé et des services sociaux (MSSS) du Québec (on going), Health Canada (completed in 2021) and Atrium Innovations [completed in 2019]). BL is an Advisory Board member of the Canadian Nutrition Society.  
 
@@ -1533,7 +1533,7 @@ In conclusion, emulating a large dietary intervention within the UK Biobank prov
 4.	Health Canada. Canada’s food guide. Ottawa: Health Canada2019.
 5.	Health Canada. Canada’s Dietary Guidelines - for Health Professionals and Policy Makers. 2019.
 6.	Health Canada. Food, Nutrients and Health: Interim Evidence Update 2018 for Health Professionals and Policy Makers. Ottawa: Health Canada2019.
-7.	Brassard D, Elvidge Munene LA, St-Pierre S, Guenther PM, Kirkpatrick SI, Slater J, et al. Development of the Healthy Eating Food Index (HEFI)-2019 measuring adherence to Canada's Food Guide 2019 recommendations on healthy food choices. Appl Physiol Nutr Metab. 2022;47:595-610.
+7.	Brassard D, Elvidge Munene LA, St-Pierre S, Guenther PM, Kirkpatrick SI, Slater J, et al. Development of the Healthy Eating Food Index (HEFI)-2019 measuring adherence to Canada's Food Guide 2019 recommendations on healthy food choices. Appl Physiol Nutr Metab. 2022;47(5):595-610.
 8.	Brassard D, Elvidge Munene LA, St-Pierre S, Gonzalez A, Guenther PM, Jessri M, et al. Evaluation of the Healthy Eating Food Index (HEFI)-2019 measuring adherence to Canada's Food Guide 2019 recommendations on healthy food choices. Appl Physiol Nutr Metab. 2022;47(5):582-94.
 9.	Sudlow C, Gallacher J, Allen N, Beral V, Burton P, Danesh J, et al. UK biobank: an open access resource for identifying the causes of a wide range of complex diseases of middle and old age. PLoS Med. 2015;12(3):e1001779.
 10.	Fry A, Littlejohns TJ, Sudlow C, Doherty N, Adamska L, Sprosen T, et al. Comparison of Sociodemographic and Health-Related Characteristics of UK Biobank Participants With Those of the General Population. Am J Epidemiol. 2017;186(9):1026-34.
