@@ -1131,6 +1131,9 @@
 
 	/* note: multivar_mcmc may take 24 to 48h to complete */
 
+	/* create seed for current replicate */
+	%let loopseed_mcmc = %eval(85600495 + &replicnum * 10);
+
 	%multivar_mcmc(
 	 data                        = stdcov_stdbc24hr_conday_out, 
 	 subject                     = replicaterowid, 
@@ -1151,7 +1154,7 @@
 	riskfactor_2  physact0_2 physact0_3 std_ageat24hr  std_deprivation  std_sedentary0  std_bmi0  std_urine_na_24h , 
 	 nev_consumers_epis1         = , 
 	 covars_prob_consumer_epis1  = , 
-	 set_seed_mcmc               = 85600495, 
+	 set_seed_mcmc               = &loopseed_mcmc., 
 	 set_number_mcmc_iterations  = 2500, 
 	 set_number_burn_iterations  = 500, 
 	 set_thin                    = 10, 
